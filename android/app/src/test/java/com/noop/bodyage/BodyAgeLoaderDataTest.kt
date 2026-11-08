@@ -36,6 +36,7 @@ class BodyAgeLoaderDataTest {
     private class Fake(val workoutRows: List<WorkoutRow> = emptyList(), hrDays: Map<LocalDate, Int> = emptyMap(), val zone: ZoneId) : BodyAgeData {
         val hr = hrDays.toMutableMap()
         val hrQueried = ArrayList<LocalDate>()
+        var beforeSamples: (() -> Unit)? = null
         override suspend fun hrCount(fromSec: Long, toSec: Long): Long =
             (hr[java.time.Instant.ofEpochSecond(fromSec).atZone(zone).toLocalDate()] ?: 0) * 60L
         var failHrAfter = Int.MAX_VALUE
@@ -45,6 +46,7 @@ class BodyAgeLoaderDataTest {
             if (hrQueried.size >= failHrAfter) throw CancellationException("cancelled")
             val day = java.time.Instant.ofEpochSecond(fromSec).atZone(zone).toLocalDate()
             hrQueried.add(day)
+            beforeSamples?.invoke()
             val minutes = hr[day] ?: return emptyList()
             return (0 until minutes * 60).map { HrSample("d", fromSec + it, 130) } // zone 3 for maxHR 180
         }
@@ -206,5 +208,18 @@ class BodyAgeLoaderDataTest {
         val after = load(data, rows, st)
         assertTrue(end in data.hrQueried) // the stale-signature row was ignored and the day read again
         assertEquals(0.0, lowOf(after), 1e-9)
+    }
+
+    @Test
+    fun anOffloadBetweenTheCountAndTheSamplesIsCaughtOnTheNextRecheck() {
+        val st = stores()
+        val data = Fake(hrDays = mapOf(end to 130), zone = utc)
+        // The offload lands after the loader read the count (130 min) but before it reads the samples (now 200 min).
+        data.beforeSamples = { data.hr[end] = 200; data.beforeSamples = null }
+        val rows = dayRows(7)
+        load(data, rows, st)
+        data.hrQueried.clear()
+        load(data, rows, st)
+        assertTrue(end in data.hrQueried) // the stored count was the earlier one, so growth is seen and the day re-read
     }
 }

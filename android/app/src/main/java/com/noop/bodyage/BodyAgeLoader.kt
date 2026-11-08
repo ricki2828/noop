@@ -110,9 +110,12 @@ object BodyAgeLoader {
             val plan = ZoneCache.plan(allDays, cached, end, priority = priority)
             remaining = plan.remaining
             fun range(d: LocalDate) = d.atStartOfDay(zone).toEpochSecond() to d.plusDays(1).atStartOfDay(zone).toEpochSecond() - 1
-            suspend fun readDay(d: LocalDate): ZoneCache.Entry {
+            // The count is read BEFORE the samples: an offload landing in between leaves the stored count lower than
+            // the data, so the next recheck sees growth and re-reads the day.
+            suspend fun readDay(d: LocalDate, knownCount: Long? = null): ZoneCache.Entry {
                 val (s, e) = range(d)
-                return ZoneCache.entryFor(d, data.hrSamples(s, e), zoneSet, data.hrCount(s, e))
+                val count = knownCount ?: data.hrCount(s, e)
+                return ZoneCache.entryFor(d, data.hrSamples(s, e), zoneSet, count)
             }
             val fresh = plan.toRead.map { readDay(it) }
             // Recent cached days: a history offload can add HR after the fact. Compare the cheap count first; only
@@ -120,8 +123,9 @@ object BodyAgeLoader {
             val updated = plan.toRecheck.mapNotNull { d ->
                 val old = cached.getValue(d)
                 val (s, e) = range(d)
-                if (data.hrCount(s, e) <= old.hrCount) null
-                else readDay(d).let { f -> if (f.credited > old.credited) f else old.copy(hrCount = f.hrCount) }
+                val count = data.hrCount(s, e)
+                if (count <= old.hrCount) null
+                else readDay(d, count).let { f -> if (f.credited > old.credited) f else old.copy(hrCount = f.hrCount) }
             }
             cache.write(fresh + updated) // only after every read above succeeded
             cached = cached + (fresh + updated).associateBy { it.day }

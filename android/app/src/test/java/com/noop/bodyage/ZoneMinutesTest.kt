@@ -209,4 +209,41 @@ class ZoneMinutesTest {
         assertEquals(10.0, split.low, 1e-9)
         assertEquals(2.0, split.high, 1e-9)
     }
+
+    @Test
+    fun aTempoRunOnTheZoneThreeFourLineStaysOneBout() {
+        // 40 cycles of 20 s at 143 (zone 3) and 10 s at 144 (zone 4), 20 minutes in all, ending on a 10 s zone 4 stretch.
+        // Each 10 s move above zone 3 is tolerated and counted as HIGH time: high = 40 x 10 = 400 s.
+        // Zone 2-3 time = 40 x 20 = 800 s; the bout spans 800 + 39 recovered excursions x 10 = 1190 s >= 600.
+        val p = ArrayList<Pair<Int, Int>>()
+        repeat(40) { p.add(20 to 143); p.add(10 to 144) }
+        val split = ZoneMinutes.fromHr(pieces(*p.toTypedArray()), zones)
+        assertEquals(800.0 / 60.0, split.low, 1e-9)
+        assertEquals(400.0 / 60.0, split.high, 1e-9)
+        assertEquals(20.0, split.creditedMinutes, 1e-9)
+    }
+
+    @Test
+    fun aFourByFourSessionCountsHardIntervalsAndOnlyBoutLengthEasyTime() {
+        // 600 s warm-up (zone 2), 4 x (240 s at 170 hard, 180 s at 130 recovery), 600 s cool-down (zone 2).
+        // A 240 s move into zones 4-5 is over the 60 s tolerance, so it ends the bout. The warm-up (600 s) counts.
+        // The first three 180 s recoveries are under a bout. The last recovery runs straight into the cool-down:
+        // 180 + 600 = 780 s, one bout. Low = 600 + 780 = 1380 s = 23 min; high = 4 x 240 = 960 s = 16 min.
+        val p = ArrayList<Pair<Int, Int>>()
+        p.add(600 to 120)
+        repeat(4) { p.add(240 to 170); p.add(180 to 130) }
+        p.add(600 to 120)
+        val split = ZoneMinutes.fromHr(pieces(*p.toTypedArray()), zones)
+        assertEquals(23.0, split.low, 1e-9)
+        assertEquals(16.0, split.high, 1e-9)
+        assertEquals(48.0, split.creditedMinutes, 1e-9)
+    }
+
+    @Test
+    fun aShortSprintInsideAnEasyBoutIsHighTimeAndTheBoutContinues() {
+        // 400 s zone 2, 30 s at 170, 400 s zone 2: one bout spanning 830 s with 800 s of zone time; the sprint is high time.
+        val split = ZoneMinutes.fromHr(pieces(400 to 115, 30 to 170, 400 to 115), zones)
+        assertEquals(800.0 / 60.0, split.low, 1e-9)
+        assertEquals(0.5, split.high, 1e-9)
+    }
 }

@@ -32,7 +32,7 @@ object ZoneMinutes {
     /** Zone 2-3 time only counts inside an unbroken bout at least this long (elapsed, tolerated dips included). */
     const val MIN_BOUT_S = 600.0
 
-    /** A dip below zone 2 up to this long does not end a bout; the dip seconds are not counted as zone time. */
+    /** Time away from zones 2-3 (a dip below, or a move into zones 4-5) up to this long does not end a bout. */
     const val MAX_DIP_S = 60.0
 
     enum class Source { HR, WORKOUT, NONE }
@@ -61,11 +61,11 @@ object ZoneMinutes {
         var runCat = 0 // 0 = other, 1 = zones 2-3, 2 = zones 4-5
         var zoneS = 0.0 // seconds actually in the current run's zones
         var spanS = 0.0 // elapsed seconds of the run, including dips that were tolerated and then recovered from
-        var dipS = 0.0  // seconds spent below zone 2 since the last zone 2-3 sample
+        var awayS = 0.0 // seconds outside zones 2-3 (a dip below, or a move into zones 4-5) since the last zone 2-3 sample
         fun flush() {
             if (runCat == 1 && spanS >= MIN_BOUT_S) lowS += zoneS
             if (runCat == 2) highS += zoneS
-            zoneS = 0.0; spanS = 0.0; dipS = 0.0
+            zoneS = 0.0; spanS = 0.0; awayS = 0.0
         }
         for (i in sorted.indices) {
             val gap = if (i < sorted.size - 1) (sorted[i + 1].ts - sorted[i].ts).toDouble() else Double.NaN
@@ -78,13 +78,16 @@ object ZoneMinutes {
             }
             if (i > 0 && (sorted[i].ts - sorted[i - 1].ts) > MAX_CREDIT_GAP_S) { flush(); runCat = 0 }
             when {
-                runCat == 1 && cat == 0 -> {
-                    // A dip below zone 2: tolerated up to MAX_DIP_S (its seconds are not zone time), then the bout ends.
-                    dipS += dur
-                    if (dipS > MAX_DIP_S) { flush(); runCat = 0 }
+                runCat == 1 && cat != 1 -> {
+                    // Away from zones 2-3 inside a bout (a dip below zone 2, or a move into zones 4-5, such as a
+                    // tempo run brushing the zone 3/4 line): tolerated up to MAX_DIP_S in total. Seconds spent in
+                    // zones 4-5 are credited as high time straight away; dip seconds are credited to nothing.
+                    if (cat == 2) highS += dur
+                    awayS += dur
+                    if (awayS > MAX_DIP_S) { flush(); runCat = cat } // the high seconds above are already counted
                 }
                 runCat == 1 && cat == 1 -> {
-                    spanS += dipS; dipS = 0.0 // recovered from a tolerated dip: it now counts toward the bout's span
+                    spanS += awayS; awayS = 0.0 // back in zones 2-3: the tolerated time now counts toward the bout's span
                     zoneS += dur; spanS += dur
                 }
                 cat != runCat -> {
