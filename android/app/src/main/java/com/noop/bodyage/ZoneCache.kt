@@ -59,12 +59,21 @@ class ZoneCache(
         const val RECHECK_DAYS = 14L
 
         /**
-         * Never-checked days come first (newest first, so the headline week resolves before old trend weeks),
+         * Never-checked days come first (the caller's [priority] days, then newest first),
          * then recent "not enough HR" days to re-check with whatever budget is left. [remaining] counts only
          * never-checked days left over, so a caller that reloads until it reaches 0 always terminates.
          */
-        fun plan(days: List<LocalDate>, cached: Map<LocalDate, Entry>, lastDay: LocalDate, budget: Int = BUDGET): Plan {
-            val unchecked = days.filter { cached[it] == null }.sortedDescending()
+        fun plan(
+            days: List<LocalDate>,
+            cached: Map<LocalDate, Entry>,
+            lastDay: LocalDate,
+            budget: Int = BUDGET,
+            priority: List<LocalDate> = emptyList(),
+        ): Plan {
+            val prio = priority.toSet()
+            // Priority days first (newest first among them), then everything else newest first.
+            val unchecked = days.filter { cached[it] == null }
+                .sortedWith(compareByDescending<LocalDate> { it in prio }.thenByDescending { it })
             val recheck = days.filter { d ->
                 cached[d]?.source == ZoneMinutes.Source.NONE && !d.isBefore(lastDay.minusDays(RECHECK_DAYS - 1))
             }.sortedDescending()

@@ -3,7 +3,9 @@ package com.noop.bodyage
 import com.noop.data.DailyMetric
 import com.noop.data.HrSample
 import com.noop.data.WhoopRepository
-import com.noop.ui.ProfileStore
+import com.noop.analytics.HrZoneSet
+import com.noop.data.MetricSeriesRow
+import com.noop.data.WorkoutRow
 import java.time.LocalDate
 import java.time.ZoneId
 
@@ -26,9 +28,36 @@ data class BodyAgeSnapshot(
     val end: LocalDate,
 )
 
+/** The exact repository reads [BodyAgeLoader] needs, so tests can supply a fake. */
+interface BodyAgeData {
+    /** Workouts from every source the Workouts screen merges, not yet deduped. */
+    suspend fun workouts(fromSec: Long, toSec: Long): List<WorkoutRow>
+    suspend fun vo2(from: String, to: String): List<MetricSeriesRow>
+    suspend fun hrSamples(fromSec: Long, toSec: Long): List<HrSample>
+}
+
+/** What the loader needs from the profile. */
+data class BodyAgeProfile(val age: Double, val sex: String, val zoneSet: HrZoneSet?)
+
+/** [BodyAgeData] over the real repository and the active strap. */
+class RepoBodyAgeData(private val repo: WhoopRepository, private val activeStrapId: String) : BodyAgeData {
+    override suspend fun workouts(fromSec: Long, toSec: Long): List<WorkoutRow> {
+        // Same sources the Workouts screen merges: WHOOP (incl. detected), Health Connect, Apple Health, lifting, activity files.
+        val others = listOf(
+            WhoopRepository.APPLE_HEALTH_SOURCE, WhoopRepository.HEALTH_CONNECT_SOURCE,
+            com.noop.ingest.LiftingImporter.SOURCE_ID, com.noop.ingest.ActivityFileImporter.SOURCE_ID,
+        ).flatMap { repo.workouts(it, fromSec, toSec) }
+        return repo.workoutsUnion(activeStrapId, fromSec, toSec) + repo.detectedWorkoutsUnion(activeStrapId, fromSec, toSec) + others
+    }
+
+    override suspend fun vo2(from: String, to: String) = repo.metricSeriesComputedUnion(activeStrapId, "vo2max_est", from, to)
+    override suspend fun hrSamples(fromSec: Long, toSec: Long) = repo.hrSamplesUnion(activeStrapId, fromSec, toSec)
+}
+
 /**
- * Reads rows from the repository and hands them to the pure layers. The only database-touching class here.
- * Database errors propagate (the UI shows an error state); cancellation is never swallowed.
+ * Reads rows through [BodyAgeData] and hands them to the pure layers. Database errors propagate (the UI shows
+ * an error state); cancellation is never swallowed, and nothing is written before every read has finished, so a
+ * cancelled load leaves the cache untouched.
  */
 object BodyAgeLoader {
 
@@ -42,13 +71,13 @@ object BodyAgeLoader {
 
     /**
      * Windows end on the last COMPLETED day (yesterday): today's row is partial (steps, workouts) and would
-     * drag the 7-day averages. Reads at most [ZoneCache.BUDGET] uncached days of heart rate per call; the
+     * drag the 7-day averages. Reads at most [ZoneCache.BUDGET] uncached days of heart rate per call, the
+     * headline week first, then the window 30 days back (so the delta is consistent), then newest first; the
      * caller reloads while [BodyAgeSnapshot.backfillingDays] is above 0.
      */
     suspend fun load(
-        repo: WhoopRepository,
-        activeStrapId: String,
-        profile: ProfileStore,
+        data: BodyAgeData,
+        profile: BodyAgeProfile,
         days: List<DailyMetric>,
         drinks: DrinksStore,
         cache: ZoneCache,
@@ -60,39 +89,33 @@ object BodyAgeLoader {
         val fromSec = histStart.atStartOfDay(zone).toEpochSecond()
         val toSec = end.plusDays(1).atStartOfDay(zone).toEpochSecond()
 
-        // Same sources the Workouts screen merges: WHOOP (incl. detected), Health Connect, Apple Health, lifting, activity files.
-        val others = listOf(
-            WhoopRepository.APPLE_HEALTH_SOURCE, WhoopRepository.HEALTH_CONNECT_SOURCE,
-            com.noop.ingest.LiftingImporter.SOURCE_ID, com.noop.ingest.ActivityFileImporter.SOURCE_ID,
-        ).flatMap { repo.workouts(it, fromSec, toSec) }
-        val workouts = ZoneMinutes.dedupeWorkouts(
-            repo.workoutsUnion(activeStrapId, fromSec, toSec) + repo.detectedWorkoutsUnion(activeStrapId, fromSec, toSec) + others,
-        )
-        val vo2 = repo.metricSeriesComputedUnion(activeStrapId, "vo2max_est", histStart.minusDays(TREND_DAYS).toString(), end.toString())
+        val workouts = ZoneMinutes.dedupeWorkouts(data.workouts(fromSec, toSec))
+        val vo2 = data.vo2(histStart.minusDays(TREND_DAYS).toString(), end.toString())
 
-        val zoneSet = profile.hrZoneSet.takeIf { it.maxHR > 0 }
+        val zoneSet = profile.zoneSet?.takeIf { it.maxHR > 0 }
         val allDays = (0..HISTORY_DAYS.toInt()).map { histStart.plusDays(it.toLong()) }
         var cached = if (zoneSet != null) cache.read(histStart, end) else emptyMap()
         var remaining = 0
         if (zoneSet != null) {
-            val plan = ZoneCache.plan(allDays, cached, end)
+            val windowOf = { last: LocalDate -> (0 until BodyAgeInputs.WINDOW_DAYS).map { last.minusDays(it.toLong()) } }
+            val priority = windowOf(end) + windowOf(end.minusDays(30))
+            val plan = ZoneCache.plan(allDays, cached, end, priority = priority)
             remaining = plan.remaining
             val fresh = plan.toCompute.map { d ->
                 val s = d.atStartOfDay(zone).toEpochSecond()
                 val e = d.plusDays(1).atStartOfDay(zone).toEpochSecond() - 1
-                val samples: List<HrSample> = repo.hrSamplesUnion(activeStrapId, s, e)
-                val z = ZoneMinutes.hrDay(samples, zoneSet)
+                val z = ZoneMinutes.hrDay(data.hrSamples(s, e), zoneSet)
                 if (z != null) ZoneCache.Entry(d, ZoneMinutes.Source.HR, z.low, z.high)
                 else ZoneCache.Entry(d, ZoneMinutes.Source.NONE, 0.0, 0.0)
             }
-            cache.write(fresh)
+            cache.write(fresh) // only after every read above succeeded
             cached = cached + fresh.associateBy { it.day }
         }
         val resolution = ZoneMinutes.resolve(allDays, cached, workouts, zone)
 
         val answers = drinks.series(histStart.toString(), end.toString())
         val raw = BodyAgeInputs.Raw(
-            chronoAge = profile.age.toDouble(),
+            chronoAge = profile.age,
             sex = profile.sex,
             days = days,
             vo2Series = vo2,

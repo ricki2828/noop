@@ -98,7 +98,7 @@ fun BodyAgePlusToday(vm: AppViewModel) {
         delay(DEBOUNCE_MS) // a newer key cancels this effect, so rapid emissions collapse into one load
         try {
             val loaded = withContext(Dispatchers.Default) {
-                BodyAgeLoader.load(vm.repo, vm.activeStrapId, profile, days, store, cache)
+                BodyAgeLoader.load(RepoBodyAgeData(vm.repo, vm.activeStrapId), BodyAgeProfile(profile.age.toDouble(), profile.sex, profile.hrZoneSet), days, store, cache)
             }
             snapshot = loaded
             loadFailed = false
