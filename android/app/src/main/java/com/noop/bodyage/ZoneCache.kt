@@ -39,7 +39,7 @@ class ZoneCache(
 
     suspend fun read(from: LocalDate, to: LocalDate): Map<LocalDate, Entry> {
         val f = from.toString(); val t = to.toString()
-        fun rows(key: String) = queryRows(DEVICE_ID, key, f, t).associate { it.day to it.value }
+        suspend fun rows(key: String) = queryRows(DEVICE_ID, key, f, t).associate { it.day to it.value }
         val src = rows(KEY_SRC); val low = rows(KEY_LOW); val high = rows(KEY_HIGH)
         val credited = rows(KEY_CREDITED); val count = rows(KEY_COUNT); val sig = rows(KEY_SIG)
         val out = HashMap<LocalDate, Entry>()
