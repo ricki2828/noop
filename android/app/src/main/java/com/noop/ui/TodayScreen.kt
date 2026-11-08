@@ -1904,6 +1904,7 @@ fun TodayScreen(
                             onOpenCoupled = onOpenCoupled,
                             onOpenCoach = onOpenCoach,
                             onCustomise = { showDashboardEditor = true },
+                            bodyAgeSlot = { com.noop.bodyage.BodyAgePlusToday(viewModel) },
                             spo2CandidateByDay = spo2CandidateByDay,
                         )
                         TodaySection.MENSTRUAL_CYCLE -> MenstrualCycleHomeCard(
@@ -4170,6 +4171,7 @@ private fun YourCardsSection(
     onOpenCoupled: () -> Unit,
     onOpenCoach: (String?) -> Unit,
     onCustomise: () -> Unit,
+    bodyAgeSlot: @Composable () -> Unit = {},
     spo2CandidateByDay: Map<String, Double> = emptyMap(),
 ) {
     // #1331 parity: honor the °C/°F preference on the Skin Temp card, the way Health / Compare (and the
@@ -4202,6 +4204,7 @@ private fun YourCardsSection(
                     contentDescription = uiString(R.string.l10n_today_screen_customise_your_cards_2428d761),
                 )
             }
+            bodyAgeSlot()
             cards.forEach { card ->
                 DashboardCardRow(
                     card = card,
