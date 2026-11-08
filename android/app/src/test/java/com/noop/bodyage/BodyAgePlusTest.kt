@@ -189,4 +189,26 @@ class BodyAgePlusTest {
         assertNotNull(r.factors.singleOrNull { it.key == FactorKey.VO2MAX })
         assertTrue(r.factors.single { it.key == FactorKey.VO2MAX }.years > 0)
     }
+
+    @Test
+    fun youngUserIsNotPushedOlderByTheFloor() {
+        val r = BodyAgePlus.compute(
+            BodyAgePlus.Inputs(
+                chronoAge = 18.0, restingHR = 40.0, vo2max = 60.0, expectedVO2max = 40.0, sleepHours = 7.5,
+                sleepConsistency = 1.0, rmssd = 80.0, rmssdNorm = 30.0, steps = 11000.0,
+                zoneLowMinPerWeek = 600.0, zoneHighMinPerWeek = 150.0, strengthSessionsPerWeek = 5.0,
+            ),
+        )
+        assertEquals(8.0, r.bodyAge!!, 1e-9)
+        assertEquals(-10.0, r.deltaYears!!, 1e-9)
+    }
+
+    @Test
+    fun perFactorYearsStayUncappedWhenTheTotalIsCapped() {
+        val r = BodyAgePlus.compute(
+            BodyAgePlus.Inputs(chronoAge = 46.0, restingHR = 120.0, sleepHours = 3.0, sleepConsistency = 0.0, steps = 0.0),
+        )
+        assertTrue(r.capped)
+        assertTrue(r.factors.sumOf { it.years } > BodyAgePlus.TOTAL_CAP_YEARS)
+    }
 }

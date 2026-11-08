@@ -108,7 +108,7 @@ object ZoneMinutes {
 
     // ── Strength ──
 
-    private val STRENGTH_WORDS = listOf("strength", "weightlift", "weight lift", "powerlift", "bodybuild", "functional", "calisthenic")
+    private val STRENGTH_WORDS = listOf("strength", "weightlift", "weight lift", "lifting", "powerlift", "bodybuild", "functional", "calisthenic")
 
     /** Strength / weightlifting / functional training, by sport label (Health Connect and WHOOP CSV spellings). */
     fun isStrength(sport: String): Boolean {

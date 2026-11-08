@@ -30,6 +30,9 @@ object BodyAgeLoader {
 
     private const val HISTORY_DAYS = 400L
 
+    /** 52 weekly trend points reach this far back; each still needs its own VO2 lookback. */
+    private const val TREND_DAYS = 7L * 52
+
     suspend fun load(
         repo: WhoopRepository,
         activeStrapId: String,
@@ -45,11 +48,16 @@ object BodyAgeLoader {
 
         val workouts = ZoneMinutes.dedupeWorkouts(
             runCatching {
-                repo.workoutsUnion(activeStrapId, fromSec, toSec) + repo.detectedWorkoutsUnion(activeStrapId, fromSec, toSec)
+                // Same sources the Workouts screen merges: WHOOP, Health Connect, Apple Health, lifting and activity files.
+                val others = listOf(
+                    WhoopRepository.APPLE_HEALTH_SOURCE, WhoopRepository.HEALTH_CONNECT_SOURCE,
+                    com.noop.ingest.LiftingImporter.SOURCE_ID, com.noop.ingest.ActivityFileImporter.SOURCE_ID,
+                ).flatMap { repo.workouts(it, fromSec, toSec) }
+                repo.workoutsUnion(activeStrapId, fromSec, toSec) + repo.detectedWorkoutsUnion(activeStrapId, fromSec, toSec) + others
             }.getOrDefault(emptyList()),
         )
         val vo2 = runCatching {
-            repo.metricSeriesComputedUnion(activeStrapId, "vo2max_est", histStart.toString(), end.toString())
+            repo.metricSeriesComputedUnion(activeStrapId, "vo2max_est", histStart.minusDays(TREND_DAYS).toString(), end.toString())
         }.getOrDefault(emptyList())
 
         // Heart rate only for the headline week; older weeks (trend) fall back to workout zones.

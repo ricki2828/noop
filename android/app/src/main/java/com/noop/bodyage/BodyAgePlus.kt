@@ -217,7 +217,11 @@ object BodyAgePlus {
         val uncapped = sumLn / LN_HAZARD_PER_YEAR
         val capped = kotlin.math.abs(uncapped) > TOTAL_CAP_YEARS
         val delta = uncapped.coerceIn(-TOTAL_CAP_YEARS, TOTAL_CAP_YEARS)
-        val bodyAge = (inputs.chronoAge + delta).coerceIn(VitalityEngine.minBodyAge, VitalityEngine.maxBodyAge)
+        // The hard 20..90 floor/ceiling must not override the +/-10 cap for a young or old user.
+        val bodyAge = (inputs.chronoAge + delta).coerceIn(
+            minOf(VitalityEngine.minBodyAge, inputs.chronoAge - TOTAL_CAP_YEARS),
+            maxOf(VitalityEngine.maxBodyAge, inputs.chronoAge + TOTAL_CAP_YEARS),
+        )
         return Result(
             chronoAge = inputs.chronoAge,
             bodyAge = bodyAge,

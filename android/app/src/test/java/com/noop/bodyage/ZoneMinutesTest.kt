@@ -89,7 +89,7 @@ class ZoneMinutesTest {
 
     @Test
     fun strengthSportsAreRecognised() {
-        listOf("Strength", "Weightlifting", "Functional Fitness", "Powerlifting", "Bodybuilding", "Calisthenics")
+        listOf("Strength", "Weightlifting", "Functional Fitness", "Powerlifting", "Bodybuilding", "Calisthenics", "Lifting")
             .forEach { assertTrue(it, ZoneMinutes.isStrength(it)) }
         listOf("Running", "Yoga", "Cycling", "HIIT").forEach { assertFalse(it, ZoneMinutes.isStrength(it)) }
     }

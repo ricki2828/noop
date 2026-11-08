@@ -49,8 +49,10 @@ import com.noop.ui.Overline
 import com.noop.ui.Palette
 import com.noop.ui.ProfileStore
 import com.noop.ui.ScreenScaffold
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 // Body Age+ UI (fork-only). Design tokens only (Palette / Metrics / NoopType) and existing Liquid components.
@@ -80,8 +82,12 @@ fun BodyAgePlusToday(vm: AppViewModel) {
     var picked by remember { mutableStateOf<Int?>(null) }
     var saveFailed by remember { mutableStateOf(false) }
 
-    LaunchedEffect(days, seq) {
-        snapshot = runCatching { BodyAgeLoader.load(vm.repo, vm.activeStrapId, profile, days, store) }.getOrNull() ?: snapshot
+    // Heavy (HR merge, 50+ builds): off the main thread, and re-run on a new day row or value, not every emission.
+    LaunchedEffect(days.size, days.lastOrNull(), seq) {
+        val loaded = withContext(Dispatchers.Default) {
+            runCatching { BodyAgeLoader.load(vm.repo, vm.activeStrapId, profile, days, store) }.getOrNull()
+        }
+        if (loaded != null) snapshot = loaded
     }
 
     val snap = snapshot

@@ -93,6 +93,11 @@ class BodyAgeInputsTest {
     }
 
     @Test
+    fun otherSexUsesTheMidFraction() {
+        assertEquals(34.225, BodyAgeInputs.expectedVo2(45.0, "nonbinary"), 1e-9)
+    }
+
+    @Test
     fun zonesSumOverTheWindowAndNeedEvidence() {
         val z = mapOf(
             end to ZoneMinutes.DayZones(60.0, 10.0, ZoneMinutes.Source.HR),
@@ -148,7 +153,6 @@ class BodyAgeInputsTest {
         // Only the last two weeks have data; earlier weeks must be gaps, not zeros or interpolations.
         val days = (0..13).map { day(it) }
         val t = BodyAgeInputs.trend(raw(days), end, weeks = 8)
-        assertTrue(t.size in 1..2)
-        assertTrue(t.all { it.day >= end.minusDays(7) })
+        assertEquals(listOf(end.minusDays(7), end), t.map { it.day })
     }
 }
