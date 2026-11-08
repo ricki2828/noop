@@ -70,6 +70,10 @@ private fun vesselFraction(delta: Double): Double = (0.5 - delta * 2.5 / 100.0).
 /** Quiet period after a data change before the (heavy) load re-runs. */
 private const val DEBOUNCE_MS = 750L
 
+/** After a failed pass with a snapshot on screen: how many quiet retries, and how far apart. */
+private const val MAX_QUIET_RETRIES = 3
+private const val QUIET_RETRY_MS = 30_000L
+
 /** Pause between backfill passes, so the UI and database stay responsive while old days are read. */
 private const val BACKFILL_PAUSE_MS = 400L
 
@@ -92,8 +96,16 @@ fun BodyAgePlusToday(vm: AppViewModel) {
     var lastRemaining by remember { mutableIntStateOf(Int.MAX_VALUE) }
 
     // A cheap change marker (row count + the newest row) instead of keying on the whole list.
-    val dataMarker = days.size * 31 + (days.lastOrNull()?.hashCode() ?: 0)
-    val dayKey = LocalDate.now().toString()
+    val dataMarker = BodyAgeLoader.changeMarker(days, profile.age, profile.sex, profile.hrZoneSet)
+    var dayKey by remember { mutableStateOf(LocalDate.now().toString()) }
+    LaunchedEffect(Unit) { // roll the windows over at midnight even when nothing recomposes
+        while (true) {
+            delay(60_000L)
+            val now = LocalDate.now().toString()
+            if (now != dayKey) dayKey = now
+        }
+    }
+    var failures by remember { mutableIntStateOf(0) }
     LaunchedEffect(dayKey, dataMarker, seq) {
         delay(DEBOUNCE_MS) // a newer key cancels this effect, so rapid emissions collapse into one load
         try {
@@ -102,6 +114,7 @@ fun BodyAgePlusToday(vm: AppViewModel) {
             }
             snapshot = loaded
             loadFailed = false
+            failures = 0
             if (picked != null && loaded.drinksYesterday != null) picked = null
             // Keep reading old days while each pass makes progress; stop if a pass reads nothing new.
             if (loaded.backfillingDays > 0 && loaded.backfillingDays < lastRemaining) {
@@ -115,6 +128,11 @@ fun BodyAgePlusToday(vm: AppViewModel) {
             throw e
         } catch (e: Exception) {
             loadFailed = true
+            // With a snapshot already on screen, keep trying quietly a few times (backfill resumes) instead of stalling.
+            if (snapshot != null && ++failures <= MAX_QUIET_RETRIES) {
+                delay(QUIET_RETRY_MS)
+                seq++
+            }
         }
     }
 
@@ -161,6 +179,7 @@ private fun BodyAgeCard(snap: BodyAgeSnapshot?, chronoAge: Double, failed: Boole
     val age = result?.bodyAge
     val delta = result?.deltaYears
     val line = when {
+        snap != null && snap.result.chronoAge < BodyAgePlus.MIN_AGE -> BodyAgeCopy.UNDER_AGE
         failed -> BodyAgeCopy.LOAD_ERROR + " \u00B7 " + BodyAgeCopy.RETRY
         snap == null -> BodyAgeCopy.LOADING
         age == null || delta == null -> BodyAgeCopy.CARD_EMPTY
@@ -394,7 +413,7 @@ private fun Hero(snap: BodyAgeSnapshot) {
             .padding(Metrics.cardPadding),
     ) {
         if (age == null || delta == null) {
-            Text(BodyAgeCopy.HERO_EMPTY, style = NoopType.headline, color = Palette.textPrimary)
+            Text(if (result.chronoAge < BodyAgePlus.MIN_AGE) BodyAgeCopy.UNDER_AGE else BodyAgeCopy.HERO_EMPTY, style = NoopType.headline, color = Palette.textPrimary)
         } else {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Metrics.space16)) {
                 val diameter = Metrics.space24 * 4

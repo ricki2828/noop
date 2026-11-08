@@ -118,8 +118,8 @@ class BodyAgePlusTest {
     @Test
     fun zoneAndStrengthCurvesHitTheirAnchors() {
         assertEquals(4.0, BodyAgePlus.zoneLowYears(0.0), 1e-9)
-        assertEquals(0.0, BodyAgePlus.zoneLowYears(100.0), 1e-9)
-        assertEquals(-1.25, BodyAgePlus.zoneLowYears(200.0), 1e-9)
+        assertEquals(0.0, BodyAgePlus.zoneLowYears(70.0), 1e-9)
+        assertEquals(-1.25, BodyAgePlus.zoneLowYears(140.0), 1e-9)
         assertEquals(-4.0, BodyAgePlus.zoneLowYears(900.0), 1e-9)
         assertEquals(1.0, BodyAgePlus.zoneHighYears(0.0), 1e-9)
         assertEquals(0.0, BodyAgePlus.zoneHighYears(10.0), 1e-9)
@@ -257,5 +257,12 @@ class BodyAgePlusTest {
             BodyAgePlus.Inputs(chronoAge = 46.0, restingHR = 75.0, sleepHours = 7.5, sleepConsistency = 0.75),
         )
         assertEquals(0.75 * 1.0 * 0.1 / (ln) , r.factors.single { it.key == FactorKey.RHR }.years, 1e-9)
+    }
+
+    @Test
+    fun profilesUnderEighteenGetNoNumber() {
+        val r = BodyAgePlus.compute(bestInputs.copy(chronoAge = 17.0))
+        assertNull(r.bodyAge)
+        assertNotNull(BodyAgePlus.compute(bestInputs.copy(chronoAge = 18.0)).bodyAge)
     }
 }

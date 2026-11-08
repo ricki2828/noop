@@ -72,4 +72,19 @@ class BodyAgeLoaderTest {
         assertEquals(1, s.hrDays)
         assertEquals(2, s.zoneDays)
     }
+
+    @Test
+    fun changeMarkerNoticesYesterdaysRowAndProfileEdits() {
+        val zones = com.noop.analytics.HrZones.zones(maxHR = 180.0)
+        val base = days()
+        val m = BodyAgeLoader.changeMarker(base, 46, "male", zones)
+        assertEquals(m, BodyAgeLoader.changeMarker(days(), 46, "male", zones))
+        // The newest row is index 0 of days() (offset 0), the list is oldest-first: reverse it so "yesterday" is second-last.
+        val ordered = base.sortedBy { it.day }
+        val edited = ordered.dropLast(2) + ordered[ordered.size - 2].copy(restingHr = 99) + ordered.last()
+        assertTrue(BodyAgeLoader.changeMarker(ordered, 46, "male", zones) != BodyAgeLoader.changeMarker(edited, 46, "male", zones))
+        assertTrue(m != BodyAgeLoader.changeMarker(base, 47, "male", zones))
+        assertTrue(m != BodyAgeLoader.changeMarker(base, 46, "female", zones))
+        assertTrue(m != BodyAgeLoader.changeMarker(base, 46, "male", com.noop.analytics.HrZones.zones(maxHR = 190.0)))
+    }
 }

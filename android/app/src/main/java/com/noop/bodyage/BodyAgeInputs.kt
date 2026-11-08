@@ -20,6 +20,9 @@ object BodyAgeInputs {
     const val CONSISTENCY_DAYS = 28
     const val VO2_LOOKBACK_DAYS = 400
 
+    /** Strength counts 0 only if the user has any workout from any source within this many days. */
+    const val STRENGTH_LOOKBACK_DAYS = 90
+
     /** Alcohol needs this many answered days in the window before it is counted. */
     const val MIN_DRINK_ANSWERS = 4
 
@@ -109,10 +112,14 @@ object BodyAgeInputs {
             zoneHigh = zoneDays.sumOf { it.high }
         }
 
-        // Strength: workouts from any source in the window. No workout of any kind in the window means we cannot
-        // tell "did none" from "nothing recorded", so it is not counted rather than counted as zero.
-        val windowWorkouts = raw.workouts.filter { ZoneMinutes.localDay(it.startTs, raw.zone) in start..end }
-        val strength: Double? = if (windowWorkouts.isEmpty()) null else windowWorkouts.count { ZoneMinutes.isStrength(it.sport) }.toDouble()
+        // Strength: 0 sessions is a real zero only when the user records workouts at all (any workout from any
+        // source in the last STRENGTH_LOOKBACK_DAYS); otherwise it is unknown, never a zero that rewards or
+        // punishes inactivity by accident.
+        val lookbackStart = end.minusDays((STRENGTH_LOOKBACK_DAYS - 1).toLong())
+        val recordsWorkouts = raw.workouts.any { ZoneMinutes.localDay(it.startTs, raw.zone) in lookbackStart..end }
+        val strength: Double? = if (!recordsWorkouts) null else raw.workouts.count {
+            ZoneMinutes.isStrength(it.sport) && ZoneMinutes.localDay(it.startTs, raw.zone) in start..end
+        }.toDouble()
 
         // Alcohol: days drinking per week, scaled from the answered days; too few answers means not counted.
         val answered = raw.drinks.filter { it.day >= start.toString() && it.day <= end.toString() }

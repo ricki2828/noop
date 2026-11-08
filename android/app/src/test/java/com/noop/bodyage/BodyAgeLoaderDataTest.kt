@@ -24,7 +24,7 @@ class BodyAgeLoaderDataTest {
     private val today = LocalDate.of(2026, 11, 8)
     private val end = today.minusDays(1)
     private val zoneSet = HrZones.zones(maxHR = 180.0)
-    private val profile = BodyAgeProfile(46.0, "male", zoneSet)
+    private var profile = BodyAgeProfile(46.0, "male", zoneSet)
 
     private class Series {
         val rows = LinkedHashMap<Triple<String, String, String>, MetricSeriesRow>()
@@ -33,8 +33,11 @@ class BodyAgeLoaderDataTest {
         fun query(d: String, k: String, a: String, b: String) = rows.values.filter { it.deviceId == d && it.key == k && it.day >= a && it.day <= b }
     }
 
-    private class Fake(val workoutRows: List<WorkoutRow> = emptyList(), val hrDays: Map<LocalDate, Int> = emptyMap(), val zone: ZoneId) : BodyAgeData {
+    private class Fake(val workoutRows: List<WorkoutRow> = emptyList(), hrDays: Map<LocalDate, Int> = emptyMap(), val zone: ZoneId) : BodyAgeData {
+        val hr = hrDays.toMutableMap()
         val hrQueried = ArrayList<LocalDate>()
+        override suspend fun hrCount(fromSec: Long, toSec: Long): Long =
+            (hr[java.time.Instant.ofEpochSecond(fromSec).atZone(zone).toLocalDate()] ?: 0) * 60L
         var failHrAfter = Int.MAX_VALUE
         override suspend fun workouts(fromSec: Long, toSec: Long) = workoutRows
         override suspend fun vo2(from: String, to: String) = emptyList<MetricSeriesRow>()
@@ -42,7 +45,7 @@ class BodyAgeLoaderDataTest {
             if (hrQueried.size >= failHrAfter) throw CancellationException("cancelled")
             val day = java.time.Instant.ofEpochSecond(fromSec).atZone(zone).toLocalDate()
             hrQueried.add(day)
-            val minutes = hrDays[day] ?: return emptyList()
+            val minutes = hr[day] ?: return emptyList()
             return (0 until minutes * 60).map { HrSample("d", fromSec + it, 130) } // zone 3 for maxHR 180
         }
     }
@@ -156,5 +159,52 @@ class BodyAgeLoaderDataTest {
         val s = load(Fake(zone = utc), dayRows(7), stores())
         assertNull(s.result.factors.firstOrNull { it.key == FactorKey.STRENGTH })
         assertTrue(s.result.notCounted.any { it.key == FactorKey.STRENGTH })
+    }
+
+    private fun lowOf(s: BodyAgeSnapshot) = s.result.factors.single { it.key == FactorKey.ZONE_LOW }.actual
+
+    @Test
+    fun aLateOffloadOntoACachedHrDayIsPickedUp() {
+        val st = stores()
+        val data = Fake(hrDays = mapOf(end to 130), zone = utc)
+        val rows = dayRows(7)
+        assertEquals(130.0, lowOf(load(data, rows, st)), 1e-6)
+        data.hr[end] = 200 // the strap's history offload lands more heart rate for that day
+        assertEquals(200.0, lowOf(load(data, rows, st)), 1e-6)
+        assertTrue(st.third.let { runBlocking { it.read(end, end)[end]!!.credited } } >= 200.0)
+    }
+
+    @Test
+    fun aLateOffloadTurnsANotEnoughHrDayIntoAnHrDay() {
+        val st = stores()
+        val data = Fake(hrDays = mapOf(end to 30), zone = utc) // 30 min: under the 120 min coverage floor
+        val rows = dayRows(7)
+        assertNull(load(data, rows, st).result.factors.firstOrNull { it.key == FactorKey.ZONE_LOW })
+        data.hr[end] = 150
+        assertEquals(150.0, lowOf(load(data, rows, st)), 1e-6)
+    }
+
+    @Test
+    fun anUnchangedCountDoesNotReReadTheDay() {
+        val st = stores()
+        val data = Fake(hrDays = mapOf(end to 130), zone = utc)
+        load(data, dayRows(7), st)
+        data.hrQueried.clear()
+        load(data, dayRows(7), st)
+        assertFalse(end in data.hrQueried)
+    }
+
+    @Test
+    fun changedZoneBoundsRecomputeTheCachedDays() {
+        val st = stores()
+        // Zone set A (max 180): 130 bpm is zone 3. Zone set B (max 220): zone 1 spans 110-131, so 130 bpm is zone 1: no low minutes.
+        val data = Fake(hrDays = mapOf(end to 130), zone = utc)
+        val rows = dayRows(7)
+        assertEquals(130.0, lowOf(load(data, rows, st)), 1e-6)
+        profile = BodyAgeProfile(46.0, "male", HrZones.zones(maxHR = 220.0))
+        data.hrQueried.clear()
+        val after = load(data, rows, st)
+        assertTrue(end in data.hrQueried) // the stale-signature row was ignored and the day read again
+        assertEquals(0.0, lowOf(after), 1e-9)
     }
 }

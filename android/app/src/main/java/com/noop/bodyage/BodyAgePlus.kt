@@ -26,6 +26,9 @@ object BodyAgePlus {
     /** Needs at least this many counted factors before a number is shown (as upstream). */
     const val MIN_FACTORS = 3
 
+    /** Younger profiles get no number (the mortality tables behind the factors are adult). */
+    const val MIN_AGE = 18.0
+
     /** Total offset from the chronological age is capped here, in years. */
     const val TOTAL_CAP_YEARS = 10.0
 
@@ -97,7 +100,10 @@ object BodyAgePlus {
 
     // ── Curves for the new factors (research v1). Years before the overlap shrink; + = older. ──
 
-    private val ZONE_LOW_CURVE = listOf(0.0 to 4.0, 100.0 to 0.0, 300.0 to -2.5, 600.0 to -4.0)
+    // Neutral point 70 min/week: WHOOP's Z1-3 neutral is 70-100 min/week for young adults (body-age-research.md
+    // section 1), and zone 2-3 bouts exclude zone 1 and short bouts, so the low end of that range is used. The rest
+    // of the curve is the earlier Z1-3 curve scaled by 0.7 (210 and 420 min/week for -2.5 and -4 years).
+    private val ZONE_LOW_CURVE = listOf(0.0 to 4.0, 70.0 to 0.0, 210.0 to -2.5, 420.0 to -4.0)
     private val ZONE_HIGH_CURVE = listOf(0.0 to 1.0, 10.0 to 0.0, 60.0 to -1.5, 150.0 to -2.0)
     private val STRENGTH_CURVE = listOf(0.0 to 1.0, 2.0 to 0.0, 3.0 to -1.0, 5.0 to -1.5)
 
@@ -111,7 +117,7 @@ object BodyAgePlus {
     const val TARGET_SLEEP_HOURS = 7.5
     const val TARGET_CONSISTENCY = 0.75
     const val TARGET_STEPS = 7000.0
-    const val TARGET_ZONE_LOW = 100.0
+    const val TARGET_ZONE_LOW = 70.0
     const val TARGET_ZONE_HIGH = 10.0
     const val TARGET_STRENGTH = 2.0
     const val TARGET_ALCOHOL_DAYS = 1.0
@@ -223,7 +229,7 @@ object BodyAgePlus {
         val notCounted = FactorKey.entries.filter { it !in counted }
             .map { NotCounted(it, inputs.missing[it] ?: MissingReason.NO_DATA) }
         val band = if (factors.size < WIDE_BAND_BELOW) BAND_YEARS_WIDE else BAND_YEARS
-        val ready = inputs.chronoAge > 0 && factors.size >= MIN_FACTORS
+        val ready = inputs.chronoAge >= MIN_AGE && factors.size >= MIN_FACTORS
         if (!ready) {
             return Result(inputs.chronoAge, null, null, band, factors, emptyList(), emptyList(), notCounted, false)
         }

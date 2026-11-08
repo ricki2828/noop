@@ -91,6 +91,7 @@ object BodyAgeCopy {
 
     fun backfilling(days: Int): String = "Trend still filling in: $days days of heart rate left to read"
 
+    const val UNDER_AGE = "Body Age+ is for ages 18 and up"
     const val LOAD_ERROR = "Couldn't read your data"
     const val RETRY = "Retry"
 

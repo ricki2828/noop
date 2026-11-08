@@ -29,8 +29,11 @@ object ZoneMinutes {
     /** A day needs at least this many credited HR minutes before HR is trusted over workout zones. */
     const val MIN_HR_MINUTES = 120.0
 
-    /** Zone 2-3 time only counts inside an unbroken bout at least this long. */
+    /** Zone 2-3 time only counts inside an unbroken bout at least this long (elapsed, tolerated dips included). */
     const val MIN_BOUT_S = 600.0
+
+    /** A dip below zone 2 up to this long does not end a bout; the dip seconds are not counted as zone time. */
+    const val MAX_DIP_S = 60.0
 
     enum class Source { HR, WORKOUT, NONE }
 
@@ -56,11 +59,13 @@ object ZoneMinutes {
         var highS = 0.0
         var creditedS = 0.0
         var runCat = 0 // 0 = other, 1 = zones 2-3, 2 = zones 4-5
-        var runS = 0.0
+        var zoneS = 0.0 // seconds actually in the current run's zones
+        var spanS = 0.0 // elapsed seconds of the run, including dips that were tolerated and then recovered from
+        var dipS = 0.0  // seconds spent below zone 2 since the last zone 2-3 sample
         fun flush() {
-            if (runCat == 1 && runS >= MIN_BOUT_S) lowS += runS
-            if (runCat == 2) highS += runS
-            runS = 0.0
+            if (runCat == 1 && spanS >= MIN_BOUT_S) lowS += zoneS
+            if (runCat == 2) highS += zoneS
+            zoneS = 0.0; spanS = 0.0; dipS = 0.0
         }
         for (i in sorted.indices) {
             val gap = if (i < sorted.size - 1) (sorted[i + 1].ts - sorted[i].ts).toDouble() else Double.NaN
@@ -71,9 +76,23 @@ object ZoneMinutes {
                 4, 5 -> 2
                 else -> 0
             }
-            val brokeByGap = i > 0 && (sorted[i].ts - sorted[i - 1].ts) > MAX_CREDIT_GAP_S
-            if (brokeByGap || cat != runCat) { flush(); runCat = cat }
-            runS += dur
+            if (i > 0 && (sorted[i].ts - sorted[i - 1].ts) > MAX_CREDIT_GAP_S) { flush(); runCat = 0 }
+            when {
+                runCat == 1 && cat == 0 -> {
+                    // A dip below zone 2: tolerated up to MAX_DIP_S (its seconds are not zone time), then the bout ends.
+                    dipS += dur
+                    if (dipS > MAX_DIP_S) { flush(); runCat = 0 }
+                }
+                runCat == 1 && cat == 1 -> {
+                    spanS += dipS; dipS = 0.0 // recovered from a tolerated dip: it now counts toward the bout's span
+                    zoneS += dur; spanS += dur
+                }
+                cat != runCat -> {
+                    flush(); runCat = cat
+                    if (cat != 0) { zoneS = dur; spanS = dur }
+                }
+                else -> if (cat != 0) { zoneS += dur; spanS += dur }
+            }
         }
         flush()
         return HrSplit(lowS / 60.0, highS / 60.0, creditedS / 60.0)

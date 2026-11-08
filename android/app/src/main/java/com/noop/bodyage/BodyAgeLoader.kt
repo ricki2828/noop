@@ -34,6 +34,9 @@ interface BodyAgeData {
     suspend fun workouts(fromSec: Long, toSec: Long): List<WorkoutRow>
     suspend fun vo2(from: String, to: String): List<MetricSeriesRow>
     suspend fun hrSamples(fromSec: Long, toSec: Long): List<HrSample>
+
+    /** Cheap HR sample count for a window (an index lookup, no rows), used to notice a late history offload. */
+    suspend fun hrCount(fromSec: Long, toSec: Long): Long
 }
 
 /** What the loader needs from the profile. */
@@ -52,6 +55,8 @@ class RepoBodyAgeData(private val repo: WhoopRepository, private val activeStrap
 
     override suspend fun vo2(from: String, to: String) = repo.metricSeriesComputedUnion(activeStrapId, "vo2max_est", from, to)
     override suspend fun hrSamples(fromSec: Long, toSec: Long) = repo.hrSamplesUnion(activeStrapId, fromSec, toSec)
+    override suspend fun hrCount(fromSec: Long, toSec: Long) =
+        ZoneCache.countFromFingerprint(repo.hrUnionFingerprint(activeStrapId, fromSec, toSec))
 }
 
 /**
@@ -94,22 +99,32 @@ object BodyAgeLoader {
 
         val zoneSet = profile.zoneSet?.takeIf { it.maxHR > 0 }
         val allDays = (0..HISTORY_DAYS.toInt()).map { histStart.plusDays(it.toLong()) }
-        var cached = if (zoneSet != null) cache.read(histStart, end) else emptyMap()
+        var cached = emptyMap<LocalDate, ZoneCache.Entry>()
         var remaining = 0
         if (zoneSet != null) {
+            val sig = ZoneCache.signature(zoneSet)
+            // Rows written under another rule version or other zone bounds are ignored: those days are redone.
+            cached = cache.read(histStart, end).filterValues { it.signature == sig }
             val windowOf = { last: LocalDate -> (0 until BodyAgeInputs.WINDOW_DAYS).map { last.minusDays(it.toLong()) } }
             val priority = windowOf(end) + windowOf(end.minusDays(30))
             val plan = ZoneCache.plan(allDays, cached, end, priority = priority)
             remaining = plan.remaining
-            val fresh = plan.toCompute.map { d ->
-                val s = d.atStartOfDay(zone).toEpochSecond()
-                val e = d.plusDays(1).atStartOfDay(zone).toEpochSecond() - 1
-                val z = ZoneMinutes.hrDay(data.hrSamples(s, e), zoneSet)
-                if (z != null) ZoneCache.Entry(d, ZoneMinutes.Source.HR, z.low, z.high)
-                else ZoneCache.Entry(d, ZoneMinutes.Source.NONE, 0.0, 0.0)
+            fun range(d: LocalDate) = d.atStartOfDay(zone).toEpochSecond() to d.plusDays(1).atStartOfDay(zone).toEpochSecond() - 1
+            suspend fun readDay(d: LocalDate): ZoneCache.Entry {
+                val (s, e) = range(d)
+                return ZoneCache.entryFor(d, data.hrSamples(s, e), zoneSet, data.hrCount(s, e))
             }
-            cache.write(fresh) // only after every read above succeeded
-            cached = cached + fresh.associateBy { it.day }
+            val fresh = plan.toRead.map { readDay(it) }
+            // Recent cached days: a history offload can add HR after the fact. Compare the cheap count first; only
+            // a day whose count grew is re-read, and its row is replaced only if the fresh read credits more minutes.
+            val updated = plan.toRecheck.mapNotNull { d ->
+                val old = cached.getValue(d)
+                val (s, e) = range(d)
+                if (data.hrCount(s, e) <= old.hrCount) null
+                else readDay(d).let { f -> if (f.credited > old.credited) f else old.copy(hrCount = f.hrCount) }
+            }
+            cache.write(fresh + updated) // only after every read above succeeded
+            cached = cached + (fresh + updated).associateBy { it.day }
         }
         val resolution = ZoneMinutes.resolve(allDays, cached, workouts, zone)
 
@@ -127,6 +142,19 @@ object BodyAgeLoader {
             unresolved = resolution.unresolved,
         )
         return assemble(raw, end, remaining, answers)
+    }
+
+    /**
+     * Cheap fingerprint of everything a reload depends on: the last 8 daily rows (the 7-day window plus today,
+     * so a finalised yesterday row is noticed) and the profile (age, sex, zone bounds). Used as an effect key.
+     */
+    fun changeMarker(days: List<DailyMetric>, age: Int, sex: String, zones: HrZoneSet): Int {
+        var h = days.size
+        for (d in days.takeLast(8)) h = h * 31 + d.hashCode()
+        h = h * 31 + age
+        h = h * 31 + sex.hashCode()
+        h = h * 31 + ZoneCache.signature(zones).toInt()
+        return h
     }
 
     /** Pure: builds the snapshot from already-loaded rows (so the orchestration is testable without a database). */

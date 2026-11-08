@@ -143,8 +143,15 @@ class BodyAgeInputsTest {
     }
 
     @Test
-    fun noWorkoutOfAnyKindInTheWindowIsNotCountedNeverZero() {
-        val i = BodyAgeInputs.build(raw(workouts = listOf(strengthWorkout(30))), end)
+    fun anyWorkoutInNinetyDaysMakesAnEmptyWeekARealZero() {
+        // One run 60 days ago, nothing since: the user records workouts, so this week's strength really is 0.
+        val i = BodyAgeInputs.build(raw(workouts = listOf(strengthWorkout(60, "Running"))), end)
+        assertEquals(0.0, i.strengthSessionsPerWeek!!, 0.0)
+    }
+
+    @Test
+    fun noWorkoutInNinetyDaysIsNotCountedNeverZero() {
+        val i = BodyAgeInputs.build(raw(workouts = listOf(strengthWorkout(100, "Running"))), end)
         assertNull(i.strengthSessionsPerWeek)
         assertNull(BodyAgeInputs.build(raw(), end).strengthSessionsPerWeek)
         val nc = BodyAgePlus.compute(i).notCounted.associateBy { it.key }

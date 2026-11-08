@@ -106,13 +106,13 @@ class ZoneMinutesTest {
 
     @Test
     fun oneSourceRulePerDay() {
-        val hrEntry = ZoneCache.Entry(day, ZoneMinutes.Source.HR, 70.0, 5.0)
+        val hrEntry = ZoneCache.Entry(day, ZoneMinutes.Source.HR, 70.0, 5.0, 600.0, 1L, 1L)
         val r = ZoneMinutes.resolve(listOf(day), mapOf(day to hrEntry), listOf(run), utc)
         assertEquals(ZoneMinutes.DayZones(70.0, 5.0, ZoneMinutes.Source.HR), r.zonesByDay[day])
         assertTrue(r.unresolved.isEmpty())
 
         // Checked, not enough HR: workout zones, resolved.
-        val none = ZoneCache.Entry(day, ZoneMinutes.Source.NONE, 0.0, 0.0)
+        val none = ZoneCache.Entry(day, ZoneMinutes.Source.NONE, 0.0, 0.0, 10.0, 1L, 1L)
         val r2 = ZoneMinutes.resolve(listOf(day), mapOf(day to none), listOf(run), utc)
         assertEquals(ZoneMinutes.DayZones(30.0, 30.0, ZoneMinutes.Source.WORKOUT), r2.zonesByDay[day])
         assertTrue(r2.unresolved.isEmpty())
@@ -144,5 +144,69 @@ class ZoneMinutesTest {
     @Test
     fun dedupeKeepsTwoSeparateSessionsOfTheSameKind() {
         assertEquals(2, ZoneMinutes.dedupeWorkouts(listOf(workout(0, 45, "Strength"), workout(86400, 45, "Strength"))).size)
+    }
+
+    // ── Varying traces (maxHR 180: zone 1 = 90-107, zone 2 = 108-125, zone 3 = 126-143, zone 4 = 144-161, zone 5 = 162+) ──
+
+    /** Pieces of (seconds, bpm) at 1 Hz, back to back. */
+    private fun pieces(vararg p: Pair<Int, Int>): List<HrSample> {
+        val out = ArrayList<HrSample>(); var t = 0L
+        for ((sec, bpm) in p) { for (i in 0 until sec) out.add(HrSample("d", t + i, bpm)); t += sec }
+        return out
+    }
+
+    @Test
+    fun oscillatingAroundTheZoneOneTwoBoundaryStaysOneBout() {
+        // 30 s at 112 (zone 2) then 20 s at 104 (zone 1), 15 times, then a final 30 s in zone 2.
+        // Dips of 20 s are tolerated. Zone time = 16 x 30 = 480 s = 8 min; the bout spans 480 + 15 x 20 = 780 s >= 600.
+        val p = ArrayList<Pair<Int, Int>>()
+        repeat(15) { p.add(30 to 112); p.add(20 to 104) }
+        p.add(30 to 112)
+        val split = ZoneMinutes.fromHr(pieces(*p.toTypedArray()), zones)
+        assertEquals(8.0, split.low, 1e-9)
+        assertEquals(13.0, split.creditedMinutes, 1e-9)
+    }
+
+    @Test
+    fun aSixtySecondDipIsToleratedButSixtyOneEndsTheBout() {
+        // 400 s zone 2, 60 s dip, 400 s zone 2: one bout, span 860 s, zone time 800 s.
+        assertEquals(800.0 / 60.0, ZoneMinutes.fromHr(pieces(400 to 112, 60 to 104, 400 to 112), zones).low, 1e-9)
+        // With a 61 s dip the bout ends at the dip: two 400 s bouts, both under 10 minutes.
+        assertEquals(0.0, ZoneMinutes.fromHr(pieces(400 to 112, 61 to 104, 400 to 112), zones).low, 0.0)
+        // Two 700 s bouts split by a 61 s dip both qualify.
+        assertEquals(1400.0 / 60.0, ZoneMinutes.fromHr(pieces(700 to 112, 61 to 104, 700 to 112), zones).low, 1e-9)
+    }
+
+    @Test
+    fun aTrailingDipDoesNotLengthenTheBout() {
+        // 570 s zone 2 then a 30 s dip then nothing: span 570 < 600, so no credit even though 600 s elapsed.
+        assertEquals(0.0, ZoneMinutes.fromHr(pieces(570 to 112, 30 to 104), zones).low, 0.0)
+    }
+
+    @Test
+    fun aDataGapEndsABoutEvenInsideTheDipTolerance() {
+        val a = pieces(400 to 112)
+        val b = pieces(400 to 112).map { it.copy(ts = it.ts + 500) } // 100 s of no data between the stretches
+        assertEquals(0.0, ZoneMinutes.fromHr(a + b, zones).low, 0.0)
+    }
+
+    @Test
+    fun intervalsWithRecoveriesCountHardTimeAndOnlyTheLongEasyStretch() {
+        // 720 s warm-up in zone 2, then 3 x (240 s at 170 hard, 180 s at 115 recovery).
+        // Warm-up is one bout of 12 min; the 180 s recoveries are too short for a bout. Hard = 3 x 4 = 12 min.
+        val split = ZoneMinutes.fromHr(
+            pieces(720 to 115, 240 to 170, 180 to 115, 240 to 170, 180 to 115, 240 to 170, 180 to 115), zones,
+        )
+        assertEquals(12.0, split.low, 1e-9)
+        assertEquals(12.0, split.high, 1e-9)
+        assertEquals(33.0, split.creditedMinutes, 1e-9)
+    }
+
+    @Test
+    fun aRiseIntoTheHardZonesEndsTheEasyBoutAndTheTrailingDipIsNotCounted() {
+        // 600 s zone 2, a 30 s dip, then 120 s hard: low bout = 10 min exactly, high = 2 min.
+        val split = ZoneMinutes.fromHr(pieces(600 to 112, 30 to 104, 120 to 170), zones)
+        assertEquals(10.0, split.low, 1e-9)
+        assertEquals(2.0, split.high, 1e-9)
     }
 }
