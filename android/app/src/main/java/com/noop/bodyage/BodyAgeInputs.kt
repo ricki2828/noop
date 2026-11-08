@@ -31,15 +31,20 @@ object BodyAgeInputs {
         val vo2Series: List<MetricSeriesRow>,
         /** Already deduped with [ZoneMinutes.dedupeWorkouts]. */
         val workouts: List<WorkoutRow>,
-        /** True when the install has ever recorded any workout; false means strength is unknown, not zero. */
-        val hasAnyWorkout: Boolean,
         val drinks: List<DrinkEntry>,
         val zonesByDay: Map<LocalDate, ZoneMinutes.DayZones>,
         val hasZoneThresholds: Boolean,
         val zone: ZoneId,
+        /** Days whose HR has not been read into the zone cache yet (see [ZoneMinutes.Resolution]). */
+        val unresolved: Set<LocalDate> = emptySet(),
     )
 
-    /** Expected VO2 max (ml/kg/min) by age, from the WHOOP male minimum-target table (research doc, Fig. 4). */
+    /**
+     * Expected VO2 max (ml/kg/min) by age, from the WHOOP male MINIMUM-target table (research doc, Fig. 4).
+     * The research file gives no 50th-percentile table (the FRIEND 2022 table is an open GAP), so this is the
+     * best sourced anchor. These are minimum targets, below the population median, so expected VO2 is low and
+     * the VO2 factor biases YOUNGER than a median reference would. Replace with FRIEND once pulled.
+     */
     private val VO2_MALE = listOf(30.0 to 44.0, 35.0 to 42.0, 40.0 to 40.0, 45.0 to 37.0, 50.0 to 36.0, 55.0 to 34.0, 60.0 to 32.0, 65.0 to 30.0)
 
     /** Women and other profiles use a flat fraction of the male table. Unverified approximation, labelled as such. */
@@ -104,10 +109,10 @@ object BodyAgeInputs {
             zoneHigh = zoneDays.sumOf { it.high }
         }
 
-        // Strength: unknown (not zero) when the install has never recorded a workout.
-        val strength: Double? = if (!raw.hasAnyWorkout) null else raw.workouts.count {
-            ZoneMinutes.isStrength(it.sport) && ZoneMinutes.localDay(it.startTs, raw.zone) in start..end
-        }.toDouble()
+        // Strength: workouts from any source in the window. No workout of any kind in the window means we cannot
+        // tell "did none" from "nothing recorded", so it is not counted rather than counted as zero.
+        val windowWorkouts = raw.workouts.filter { ZoneMinutes.localDay(it.startTs, raw.zone) in start..end }
+        val strength: Double? = if (windowWorkouts.isEmpty()) null else windowWorkouts.count { ZoneMinutes.isStrength(it.sport) }.toDouble()
 
         // Alcohol: days drinking per week, scaled from the answered days; too few answers means not counted.
         val answered = raw.drinks.filter { it.day >= start.toString() && it.day <= end.toString() }
@@ -138,13 +143,19 @@ object BodyAgeInputs {
 
     data class TrendPoint(val day: LocalDate, val bodyAge: Double)
 
+    /** True when every day of the 7-day window ending [end] has had its HR read (or zones do not use HR). */
+    fun windowResolved(raw: Raw, end: LocalDate): Boolean =
+        !raw.hasZoneThresholds || (0 until WINDOW_DAYS).none { end.minusDays(it.toLong()) in raw.unresolved }
+
     /**
      * Weekly points ending at [end] (oldest first), one every 7 days. A week with fewer than the minimum
-     * counted factors is left out, so the chart draws a break rather than an interpolated value.
+     * counted factors, or whose zone data is still being read, is left out, so the chart draws a break
+     * rather than an interpolated or mixed-source value.
      */
     fun trend(raw: Raw, end: LocalDate, weeks: Int = 52): List<TrendPoint> =
         (weeks - 1 downTo 0).mapNotNull { w ->
             val day = end.minusDays(7L * w)
+            if (!windowResolved(raw, day)) return@mapNotNull null
             BodyAgePlus.compute(build(raw, day)).bodyAge?.let { TrendPoint(day, it) }
         }
 }

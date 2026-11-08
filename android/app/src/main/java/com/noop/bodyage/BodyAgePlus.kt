@@ -194,9 +194,23 @@ object BodyAgePlus {
     fun rankHelping(factors: List<Factor>, max: Int = MAX_HELPING): List<Factor> =
         factors.filter { it.years < -SIGNIFICANT_YEARS }.sortedBy { it.years }.take(max)
 
+    /** The fitness block (VO2 + resting HR + zone 4-5) is capped at this many years, before the overlap shrink. */
+    const val FITNESS_BLOCK_CAP_YEARS = 8.0
+
+    private val FITNESS_BLOCK = setOf(FactorKey.VO2MAX, FactorKey.RHR, FactorKey.ZONE_HIGH)
+
+    /** Scales the three fitness-block factors down together when their combined years pass the cap (they overlap). */
+    private fun capFitnessBlock(raw: List<Triple<FactorKey, Double, Pair<Double, Double>>>) :
+        List<Triple<FactorKey, Double, Pair<Double, Double>>> {
+        val blockYears = raw.filter { it.first in FITNESS_BLOCK }.sumOf { it.second } / LN_HAZARD_PER_YEAR
+        if (kotlin.math.abs(blockYears) <= FITNESS_BLOCK_CAP_YEARS) return raw
+        val scale = FITNESS_BLOCK_CAP_YEARS / kotlin.math.abs(blockYears)
+        return raw.map { if (it.first in FITNESS_BLOCK) Triple(it.first, it.second * scale, it.third) else it }
+    }
+
     fun compute(inputs: Inputs): Result {
-        val raw = rawFactors(inputs)
-        val factors = raw.map { (key, ln, at) ->
+        val raw = capFitnessBlock(rawFactors(inputs))
+        var factors = raw.map { (key, ln, at) ->
             Factor(
                 key = key,
                 lnHazard = ln,
@@ -213,19 +227,21 @@ object BodyAgePlus {
         if (!ready) {
             return Result(inputs.chronoAge, null, null, band, factors, emptyList(), emptyList(), notCounted, false)
         }
-        val sumLn = factors.sumOf { it.lnHazard } * OVERLAP_SHRINK
-        val uncapped = sumLn / LN_HAZARD_PER_YEAR
+        val uncapped = factors.sumOf { it.years }
         val capped = kotlin.math.abs(uncapped) > TOTAL_CAP_YEARS
         val delta = uncapped.coerceIn(-TOTAL_CAP_YEARS, TOTAL_CAP_YEARS)
-        // The hard 20..90 floor/ceiling must not override the +/-10 cap for a young or old user.
-        val bodyAge = (inputs.chronoAge + delta).coerceIn(
-            minOf(VitalityEngine.minBodyAge, inputs.chronoAge - TOTAL_CAP_YEARS),
-            maxOf(VitalityEngine.maxBodyAge, inputs.chronoAge + TOTAL_CAP_YEARS),
-        )
+        if (capped) {
+            // Shrink every row by the same ratio so the rows shown never add up to more than the delta shown.
+            val ratio = TOTAL_CAP_YEARS / kotlin.math.abs(uncapped)
+            factors = factors.map { it.copy(years = it.years * ratio) }
+        }
+        // No 20..90 clamp: the +/-10 cap above already bounds the result, and a floor or ceiling could flip
+        // the sign of the delta for a very young or very old profile.
+        val bodyAge = inputs.chronoAge + delta
         return Result(
             chronoAge = inputs.chronoAge,
             bodyAge = bodyAge,
-            deltaYears = bodyAge - inputs.chronoAge,
+            deltaYears = delta,
             bandYears = band,
             factors = factors,
             shortfalls = rankShortfalls(factors),

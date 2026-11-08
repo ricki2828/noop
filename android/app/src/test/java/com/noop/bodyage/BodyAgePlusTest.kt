@@ -190,25 +190,72 @@ class BodyAgePlusTest {
         assertTrue(r.factors.single { it.key == FactorKey.VO2MAX }.years > 0)
     }
 
+    private val bestInputs = BodyAgePlus.Inputs(
+        chronoAge = 18.0, restingHR = 40.0, vo2max = 60.0, expectedVO2max = 40.0, sleepHours = 7.5,
+        sleepConsistency = 1.0, rmssd = 80.0, rmssdNorm = 30.0, steps = 11000.0,
+        zoneLowMinPerWeek = 600.0, zoneHighMinPerWeek = 150.0, strengthSessionsPerWeek = 5.0,
+    )
+    private val worstInputs = BodyAgePlus.Inputs(
+        chronoAge = 92.0, restingHR = 120.0, vo2max = 20.0, expectedVO2max = 50.0, sleepHours = 3.0,
+        sleepConsistency = 0.0, rmssd = 0.0, rmssdNorm = 30.0, steps = 0.0,
+        zoneLowMinPerWeek = 0.0, zoneHighMinPerWeek = 0.0, strengthSessionsPerWeek = 0.0, alcoholDaysPerWeek = 7.0,
+    )
+
     @Test
-    fun youngUserIsNotPushedOlderByTheFloor() {
-        val r = BodyAgePlus.compute(
-            BodyAgePlus.Inputs(
-                chronoAge = 18.0, restingHR = 40.0, vo2max = 60.0, expectedVO2max = 40.0, sleepHours = 7.5,
-                sleepConsistency = 1.0, rmssd = 80.0, rmssdNorm = 30.0, steps = 11000.0,
-                zoneLowMinPerWeek = 600.0, zoneHighMinPerWeek = 150.0, strengthSessionsPerWeek = 5.0,
-            ),
-        )
+    fun ageEighteenReadsYoungerNeverOlder() {
+        val r = BodyAgePlus.compute(bestInputs)
         assertEquals(8.0, r.bodyAge!!, 1e-9)
         assertEquals(-10.0, r.deltaYears!!, 1e-9)
     }
 
     @Test
-    fun perFactorYearsStayUncappedWhenTheTotalIsCapped() {
-        val r = BodyAgePlus.compute(
-            BodyAgePlus.Inputs(chronoAge = 46.0, restingHR = 120.0, sleepHours = 3.0, sleepConsistency = 0.0, steps = 0.0),
-        )
+    fun ageNinetyTwoReadsOlderNeverYoungerAndHealthyStaysYounger() {
+        val bad = BodyAgePlus.compute(worstInputs)
+        assertEquals(102.0, bad.bodyAge!!, 1e-9)
+        assertEquals(10.0, bad.deltaYears!!, 1e-9)
+        val good = BodyAgePlus.compute(bestInputs.copy(chronoAge = 92.0))
+        assertEquals(82.0, good.bodyAge!!, 1e-9)
+    }
+
+    @Test
+    fun rowsNeverAddUpToMoreThanTheCappedDelta() {
+        val r = BodyAgePlus.compute(worstInputs)
         assertTrue(r.capped)
-        assertTrue(r.factors.sumOf { it.years } > BodyAgePlus.TOTAL_CAP_YEARS)
+        assertEquals(10.0, r.factors.sumOf { it.years }, 1e-9)
+        assertTrue(r.shortfalls.all { it.years <= 10.0 })
+    }
+
+    @Test
+    fun uncappedRowsAreLeftAlone() {
+        val r = BodyAgePlus.compute(
+            BodyAgePlus.Inputs(chronoAge = 46.0, restingHR = 56.5, sleepHours = 6.3, sleepConsistency = 0.67, strengthSessionsPerWeek = 0.0),
+        )
+        assertEquals(0.75, r.factors.single { it.key == FactorKey.STRENGTH }.years, 1e-9)
+    }
+
+    // Hand calculation. rhr 120: (120-65)/10*0.100 = 0.55. vo2 20 vs 50: (50-20)/3.5 = 8.57 -> clamp 4.0 * 0.130 = 0.52.
+    // zone 4-5 at 0 min: +1.0 y = 0.0866434. Block = 1.1566434 / 0.0866434 = 13.349 y > 8, so the three scale by
+    // 8 / 13.349 and add up to exactly 8 y before the 0.75 shrink = 6.0 y. Sleep 7.5 and regularity 0.75 add 0.
+    @Test
+    fun fitnessBlockIsCappedAtEightYears() {
+        val r = BodyAgePlus.compute(
+            BodyAgePlus.Inputs(
+                chronoAge = 46.0, restingHR = 120.0, vo2max = 20.0, expectedVO2max = 50.0,
+                zoneHighMinPerWeek = 0.0, sleepHours = 7.5, sleepConsistency = 0.75,
+            ),
+        )
+        val block = r.factors.filter { it.key in setOf(FactorKey.RHR, FactorKey.VO2MAX, FactorKey.ZONE_HIGH) }
+        assertEquals(3, block.size)
+        assertEquals(6.0, block.sumOf { it.years }, 1e-9)
+        assertEquals(6.0, r.deltaYears!!, 1e-9)
+        assertEquals(52.0, r.bodyAge!!, 1e-9)
+    }
+
+    @Test
+    fun fitnessBlockBelowTheCapIsUntouched() {
+        val r = BodyAgePlus.compute(
+            BodyAgePlus.Inputs(chronoAge = 46.0, restingHR = 75.0, sleepHours = 7.5, sleepConsistency = 0.75),
+        )
+        assertEquals(0.75 * 1.0 * 0.1 / (ln) , r.factors.single { it.key == FactorKey.RHR }.years, 1e-9)
     }
 }

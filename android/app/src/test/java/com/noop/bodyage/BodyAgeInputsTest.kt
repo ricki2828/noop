@@ -25,11 +25,11 @@ class BodyAgeInputsTest {
         days: List<DailyMetric> = emptyList(),
         vo2: List<MetricSeriesRow> = emptyList(),
         workouts: List<WorkoutRow> = emptyList(),
-        hasAnyWorkout: Boolean = workouts.isNotEmpty(),
         drinks: List<DrinkEntry> = emptyList(),
         zones: Map<LocalDate, ZoneMinutes.DayZones> = emptyMap(),
         thresholds: Boolean = true,
-    ) = BodyAgeInputs.Raw(46.0, "male", days, vo2, workouts, hasAnyWorkout, drinks, zones, thresholds, utc)
+        unresolved: Set<LocalDate> = emptySet(),
+    ) = BodyAgeInputs.Raw(46.0, "male", days, vo2, workouts, drinks, zones, thresholds, utc, unresolved)
 
     @Test
     fun fixtureRowsGiveExpectedInputs() {
@@ -122,17 +122,33 @@ class BodyAgeInputsTest {
         assertEquals(MissingReason.NO_THRESHOLDS, nc[FactorKey.ZONE_HIGH]!!.reason)
     }
 
-    private fun strengthWorkout(offset: Int, sport: String = "Strength") = end.minusDays(offset.toLong()).atStartOfDay(utc).toEpochSecond().let {
-        WorkoutRow("d", it + 3600, it + 7200, sport, "test", durationS = 3600.0)
+    private fun strengthWorkout(offset: Int, sport: String = "Strength", device: String = "d") =
+        end.minusDays(offset.toLong()).atStartOfDay(utc).toEpochSecond().let {
+            WorkoutRow(device, it + 3600, it + 7200, sport, "test", durationS = 3600.0)
+        }
+
+    @Test
+    fun strengthCountsSessionsFromEverySourceInTheWindow() {
+        val ws = listOf(
+            strengthWorkout(1), strengthWorkout(3, "Weightlifting"), strengthWorkout(2, "Running"),
+            strengthWorkout(4, "Weight Training", device = "health-connect"), strengthWorkout(5, "Lifting", device = "lifting"),
+            strengthWorkout(10),
+        )
+        assertEquals(4.0, BodyAgeInputs.build(raw(workouts = ws), end).strengthSessionsPerWeek!!, 0.0)
     }
 
     @Test
-    fun strengthCountsSessionsInWindowAndIsUnknownWithoutAnyWorkout() {
-        val ws = listOf(strengthWorkout(1), strengthWorkout(3, "Weightlifting"), strengthWorkout(2, "Running"), strengthWorkout(10))
-        assertEquals(2.0, BodyAgeInputs.build(raw(workouts = ws), end).strengthSessionsPerWeek!!, 0.0)
-        assertNull(BodyAgeInputs.build(raw(hasAnyWorkout = false), end).strengthSessionsPerWeek)
-        // Has workouts elsewhere but none this week: a real zero.
-        assertEquals(0.0, BodyAgeInputs.build(raw(workouts = listOf(strengthWorkout(30))), end).strengthSessionsPerWeek!!, 0.0)
+    fun strengthIsAZeroOnlyWhenOtherWorkoutsProveTheWeekWasRecorded() {
+        assertEquals(0.0, BodyAgeInputs.build(raw(workouts = listOf(strengthWorkout(2, "Running"))), end).strengthSessionsPerWeek!!, 0.0)
+    }
+
+    @Test
+    fun noWorkoutOfAnyKindInTheWindowIsNotCountedNeverZero() {
+        val i = BodyAgeInputs.build(raw(workouts = listOf(strengthWorkout(30))), end)
+        assertNull(i.strengthSessionsPerWeek)
+        assertNull(BodyAgeInputs.build(raw(), end).strengthSessionsPerWeek)
+        val nc = BodyAgePlus.compute(i).notCounted.associateBy { it.key }
+        assertEquals(MissingReason.NO_DATA, nc[FactorKey.STRENGTH]!!.reason)
     }
 
     @Test
@@ -154,5 +170,22 @@ class BodyAgeInputsTest {
         val days = (0..13).map { day(it) }
         val t = BodyAgeInputs.trend(raw(days), end, weeks = 8)
         assertEquals(listOf(end.minusDays(7), end), t.map { it.day })
+    }
+
+    @Test
+    fun trendSkipsWeeksWhoseHrIsStillBeingRead() {
+        val days = (0..20).map { day(it) }
+        val unresolved = (8..10).map { end.minusDays(it.toLong()) }.toSet() // inside the window ending end-7 only
+        val t = BodyAgeInputs.trend(raw(days, unresolved = unresolved), end, weeks = 3)
+        assertEquals(listOf(end.minusDays(14), end), t.map { it.day })
+        assertTrue(!BodyAgeInputs.windowResolved(raw(unresolved = unresolved), end.minusDays(7)))
+        assertTrue(BodyAgeInputs.windowResolved(raw(unresolved = unresolved), end))
+    }
+
+    @Test
+    fun todaysPartialRowNeverEntersAWindowEndingYesterday() {
+        val yesterday = end.minusDays(1)
+        val rows = (1..7).map { day(it, steps = 8000) } + day(0, steps = 300) // "today" = end, partial steps
+        assertEquals(8000.0, BodyAgeInputs.build(raw(rows), yesterday).steps!!, 1e-9)
     }
 }

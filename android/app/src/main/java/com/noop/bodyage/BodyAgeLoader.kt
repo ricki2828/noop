@@ -1,28 +1,35 @@
 package com.noop.bodyage
 
 import com.noop.data.DailyMetric
+import com.noop.data.HrSample
 import com.noop.data.WhoopRepository
 import com.noop.ui.ProfileStore
 import java.time.LocalDate
 import java.time.ZoneId
 
-/** Everything the Body Age+ card and screen show, computed on demand (nothing is stored). */
+/** Everything the Body Age+ card and screen show, computed on demand (only the zone cache is stored). */
 data class BodyAgeSnapshot(
     val result: BodyAgePlus.Result,
     /** Weekly points, oldest first, for the 12-month line. Gaps are weeks left out. */
     val trend: List<BodyAgeInputs.TrendPoint>,
-    /** Change in body age over the last 30 days, or null when either end is missing or inside the noise. */
+    /** Change in body age over the last 30 days, or null when either end is missing, unresolved or inside the noise. */
     val thirtyDayChange: Double?,
     val thirtyDayFrom: LocalDate?,
-    /** Where today's zone minutes came from, for the "N of 7 days from heart rate" footnote. */
+    /** Days of the headline week whose zones came from heart rate, and days with any zone source. */
     val hrDays: Int,
     val zoneDays: Int,
+    /** Days of heart rate still to be read into the cache; the trend is incomplete while this is above 0. */
+    val backfillingDays: Int,
+    /** Answer for [end] (the last completed day), or null when unanswered. */
     val drinksYesterday: Int?,
-    val yesterday: LocalDate,
+    /** The last completed day: the end of every window. */
     val end: LocalDate,
 )
 
-/** Reads rows from the repository and hands them to the pure layers. The only database-touching class here. */
+/**
+ * Reads rows from the repository and hands them to the pure layers. The only database-touching class here.
+ * Database errors propagate (the UI shows an error state); cancellation is never swallowed.
+ */
 object BodyAgeLoader {
 
     /** 30-day changes smaller than this are noise and not shown (research doc). */
@@ -33,78 +40,93 @@ object BodyAgeLoader {
     /** 52 weekly trend points reach this far back; each still needs its own VO2 lookback. */
     private const val TREND_DAYS = 7L * 52
 
+    /**
+     * Windows end on the last COMPLETED day (yesterday): today's row is partial (steps, workouts) and would
+     * drag the 7-day averages. Reads at most [ZoneCache.BUDGET] uncached days of heart rate per call; the
+     * caller reloads while [BodyAgeSnapshot.backfillingDays] is above 0.
+     */
     suspend fun load(
         repo: WhoopRepository,
         activeStrapId: String,
         profile: ProfileStore,
         days: List<DailyMetric>,
         drinks: DrinksStore,
-        end: LocalDate = LocalDate.now(),
+        cache: ZoneCache,
+        today: LocalDate = LocalDate.now(),
         zone: ZoneId = ZoneId.systemDefault(),
     ): BodyAgeSnapshot {
+        val end = today.minusDays(1)
         val histStart = end.minusDays(HISTORY_DAYS)
         val fromSec = histStart.atStartOfDay(zone).toEpochSecond()
         val toSec = end.plusDays(1).atStartOfDay(zone).toEpochSecond()
 
+        // Same sources the Workouts screen merges: WHOOP (incl. detected), Health Connect, Apple Health, lifting, activity files.
+        val others = listOf(
+            WhoopRepository.APPLE_HEALTH_SOURCE, WhoopRepository.HEALTH_CONNECT_SOURCE,
+            com.noop.ingest.LiftingImporter.SOURCE_ID, com.noop.ingest.ActivityFileImporter.SOURCE_ID,
+        ).flatMap { repo.workouts(it, fromSec, toSec) }
         val workouts = ZoneMinutes.dedupeWorkouts(
-            runCatching {
-                // Same sources the Workouts screen merges: WHOOP, Health Connect, Apple Health, lifting and activity files.
-                val others = listOf(
-                    WhoopRepository.APPLE_HEALTH_SOURCE, WhoopRepository.HEALTH_CONNECT_SOURCE,
-                    com.noop.ingest.LiftingImporter.SOURCE_ID, com.noop.ingest.ActivityFileImporter.SOURCE_ID,
-                ).flatMap { repo.workouts(it, fromSec, toSec) }
-                repo.workoutsUnion(activeStrapId, fromSec, toSec) + repo.detectedWorkoutsUnion(activeStrapId, fromSec, toSec) + others
-            }.getOrDefault(emptyList()),
+            repo.workoutsUnion(activeStrapId, fromSec, toSec) + repo.detectedWorkoutsUnion(activeStrapId, fromSec, toSec) + others,
         )
-        val vo2 = runCatching {
-            repo.metricSeriesComputedUnion(activeStrapId, "vo2max_est", histStart.minusDays(TREND_DAYS).toString(), end.toString())
-        }.getOrDefault(emptyList())
+        val vo2 = repo.metricSeriesComputedUnion(activeStrapId, "vo2max_est", histStart.minusDays(TREND_DAYS).toString(), end.toString())
 
-        // Heart rate only for the headline week; older weeks (trend) fall back to workout zones.
         val zoneSet = profile.hrZoneSet.takeIf { it.maxHR > 0 }
-        val weekDays = (0 until BodyAgeInputs.WINDOW_DAYS).map { end.minusDays((BodyAgeInputs.WINDOW_DAYS - 1 - it).toLong()) }
-        val hrByDay = HashMap<LocalDate, List<com.noop.data.HrSample>>()
+        val allDays = (0..HISTORY_DAYS.toInt()).map { histStart.plusDays(it.toLong()) }
+        var cached = if (zoneSet != null) cache.read(histStart, end) else emptyMap()
+        var remaining = 0
         if (zoneSet != null) {
-            for (d in weekDays) {
+            val plan = ZoneCache.plan(allDays, cached, end)
+            remaining = plan.remaining
+            val fresh = plan.toCompute.map { d ->
                 val s = d.atStartOfDay(zone).toEpochSecond()
                 val e = d.plusDays(1).atStartOfDay(zone).toEpochSecond() - 1
-                hrByDay[d] = runCatching { repo.hrSamplesUnion(activeStrapId, s, e) }.getOrDefault(emptyList())
+                val samples: List<HrSample> = repo.hrSamplesUnion(activeStrapId, s, e)
+                val z = ZoneMinutes.hrDay(samples, zoneSet)
+                if (z != null) ZoneCache.Entry(d, ZoneMinutes.Source.HR, z.low, z.high)
+                else ZoneCache.Entry(d, ZoneMinutes.Source.NONE, 0.0, 0.0)
             }
+            cache.write(fresh)
+            cached = cached + fresh.associateBy { it.day }
         }
-        val olderDays = (0..HISTORY_DAYS.toInt()).map { histStart.plusDays(it.toLong()) }
-        val zonesByDay = ZoneMinutes.byDay(olderDays, hrByDay, workouts, zoneSet, zone)
+        val resolution = ZoneMinutes.resolve(allDays, cached, workouts, zone)
 
-        val answers = runCatching { drinks.series(histStart.toString(), end.toString()) }.getOrDefault(emptyList())
-
+        val answers = drinks.series(histStart.toString(), end.toString())
         val raw = BodyAgeInputs.Raw(
             chronoAge = profile.age.toDouble(),
             sex = profile.sex,
             days = days,
             vo2Series = vo2,
             workouts = workouts,
-            hasAnyWorkout = workouts.isNotEmpty(),
             drinks = answers,
-            zonesByDay = zonesByDay,
+            zonesByDay = resolution.zonesByDay,
             hasZoneThresholds = zoneSet != null,
             zone = zone,
+            unresolved = resolution.unresolved,
         )
+        return assemble(raw, end, remaining, answers)
+    }
+
+    /** Pure: builds the snapshot from already-loaded rows (so the orchestration is testable without a database). */
+    internal fun assemble(raw: BodyAgeInputs.Raw, end: LocalDate, backfillingDays: Int, answers: List<DrinkEntry>): BodyAgeSnapshot {
         val result = BodyAgePlus.compute(BodyAgeInputs.build(raw, end))
         val trend = BodyAgeInputs.trend(raw, end)
 
         val from30 = end.minusDays(30)
-        val before = BodyAgePlus.compute(BodyAgeInputs.build(raw, from30)).bodyAge
-        val change = result.bodyAge?.let { now -> before?.let { now - it } }?.takeIf { kotlin.math.abs(it) >= NOISE_YEARS }
+        val change = if (BodyAgeInputs.windowResolved(raw, end) && BodyAgeInputs.windowResolved(raw, from30)) {
+            val before = BodyAgePlus.compute(BodyAgeInputs.build(raw, from30)).bodyAge
+            result.bodyAge?.let { now -> before?.let { now - it } }?.takeIf { kotlin.math.abs(it) >= NOISE_YEARS }
+        } else null
 
-        val yesterday = end.minusDays(1)
+        val week = (0 until BodyAgeInputs.WINDOW_DAYS).map { end.minusDays(it.toLong()) }
         return BodyAgeSnapshot(
             result = result,
             trend = trend,
             thirtyDayChange = change,
             thirtyDayFrom = if (change != null) from30 else null,
-            hrDays = weekDays.count { zonesByDay[it]?.source == ZoneMinutes.Source.HR },
-            zoneDays = weekDays.count { (zonesByDay[it]?.source ?: ZoneMinutes.Source.NONE) != ZoneMinutes.Source.NONE },
-            drinksYesterday = answers.firstOrNull { it.day == yesterday.toString() }?.count,
-            yesterday = yesterday,
+            hrDays = week.count { raw.zonesByDay[it]?.source == ZoneMinutes.Source.HR },
+            zoneDays = week.count { (raw.zonesByDay[it]?.source ?: ZoneMinutes.Source.NONE) != ZoneMinutes.Source.NONE },
+            backfillingDays = backfillingDays,
+            drinksYesterday = answers.firstOrNull { it.day == end.toString() }?.count,
             end = end,
         )
     }

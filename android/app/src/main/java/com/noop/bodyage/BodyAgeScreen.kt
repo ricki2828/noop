@@ -27,8 +27,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Shadow
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -49,10 +47,12 @@ import com.noop.ui.Overline
 import com.noop.ui.Palette
 import com.noop.ui.ProfileStore
 import com.noop.ui.ScreenScaffold
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.LocalDate
 import kotlin.math.roundToInt
 
 // Body Age+ UI (fork-only). Design tokens only (Palette / Metrics / NoopType) and existing Liquid components.
@@ -67,6 +67,12 @@ private fun deltaColor(delta: Double): Color =
 /** 0..1 fill for the vessel: half full at your age, fuller the younger you read (Vitality's 2.5 points per year). */
 private fun vesselFraction(delta: Double): Double = (0.5 - delta * 2.5 / 100.0).coerceIn(0.0, 1.0)
 
+/** Quiet period after a data change before the (heavy) load re-runs. */
+private const val DEBOUNCE_MS = 750L
+
+/** Pause between backfill passes, so the UI and database stay responsive while old days are read. */
+private const val BACKFILL_PAUSE_MS = 400L
+
 /** Loads the snapshot for the Today card and screen and owns the drinks answer. */
 @Composable
 fun BodyAgePlusToday(vm: AppViewModel) {
@@ -74,38 +80,70 @@ fun BodyAgePlusToday(vm: AppViewModel) {
     val profile = remember { ProfileStore.from(context.applicationContext) }
     val days by vm.recentDays.collectAsStateWithLifecycle()
     val store = remember { DrinksStore(vm.repo) }
+    val cache = remember { ZoneCache(vm.repo) }
     val scope = rememberCoroutineScope()
 
     var snapshot by remember { mutableStateOf<BodyAgeSnapshot?>(null) }
+    var loadFailed by remember { mutableStateOf(false) }
     var seq by remember { mutableIntStateOf(0) }
     var open by remember { mutableStateOf(false) }
     var picked by remember { mutableStateOf<Int?>(null) }
     var saveFailed by remember { mutableStateOf(false) }
+    var lastRemaining by remember { mutableIntStateOf(Int.MAX_VALUE) }
 
-    // Heavy (HR merge, 50+ builds): off the main thread, and re-run on a new day row or value, not every emission.
-    LaunchedEffect(days.size, days.lastOrNull(), seq) {
-        val loaded = withContext(Dispatchers.Default) {
-            runCatching { BodyAgeLoader.load(vm.repo, vm.activeStrapId, profile, days, store) }.getOrNull()
+    // A cheap change marker (row count + the newest row) instead of keying on the whole list.
+    val dataMarker = days.size * 31 + (days.lastOrNull()?.hashCode() ?: 0)
+    val dayKey = LocalDate.now().toString()
+    LaunchedEffect(dayKey, dataMarker, seq) {
+        delay(DEBOUNCE_MS) // a newer key cancels this effect, so rapid emissions collapse into one load
+        try {
+            val loaded = withContext(Dispatchers.Default) {
+                BodyAgeLoader.load(vm.repo, vm.activeStrapId, profile, days, store, cache)
+            }
+            snapshot = loaded
+            loadFailed = false
+            if (picked != null && loaded.drinksYesterday != null) picked = null
+            // Keep reading old days while each pass makes progress; stop if a pass reads nothing new.
+            if (loaded.backfillingDays > 0 && loaded.backfillingDays < lastRemaining) {
+                lastRemaining = loaded.backfillingDays
+                delay(BACKFILL_PAUSE_MS)
+                seq++
+            } else if (loaded.backfillingDays == 0) {
+                lastRemaining = Int.MAX_VALUE
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            loadFailed = true
         }
-        if (loaded != null) snapshot = loaded
     }
 
     val snap = snapshot
     fun answer(count: Int) {
-        val day = snap?.yesterday?.toString() ?: DrinksStore.yesterdayKey()
+        // Yesterday from the clock at tap time, not from a snapshot that may predate midnight.
+        val day = DrinksStore.yesterdayKey()
         picked = count
         saveFailed = false
         scope.launch {
-            val ok = runCatching { store.setDrinks(day, count) }.isSuccess
+            val ok = try {
+                store.setDrinks(day, count); true
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                false
+            }
             if (!ok) { picked = null; saveFailed = true; return@launch }
             delay(ANSWERED_COLLAPSE_MS)
-            seq++
-            picked = null
+            seq++ // the row stays selected until this reload lands and shows the saved answer
         }
     }
 
+    val retry = { loadFailed = false; lastRemaining = Int.MAX_VALUE; seq++ }
     Column(verticalArrangement = Arrangement.spacedBy(Metrics.space8)) {
-        BodyAgeCard(snap, profile.age.toDouble(), onClick = { open = true })
+        BodyAgeCard(
+            snap, profile.age.toDouble(), failed = loadFailed && snap == null,
+            onClick = { if (loadFailed && snap == null) retry() else open = true },
+        )
         if (snap != null && (snap.drinksYesterday == null || picked != null)) {
             NoopCard {
                 DrinksRow(selected = picked, failed = saveFailed, onPick = ::answer)
@@ -113,16 +151,17 @@ fun BodyAgePlusToday(vm: AppViewModel) {
         }
     }
     if (open) {
-        BodyAgeDialog(snap, store, onDrinks = { seq++ }, onClose = { open = false })
+        BodyAgeDialog(snap, loadFailed, store, onRetry = retry, onDrinks = { seq++ }, onClose = { open = false })
     }
 }
 
 @Composable
-private fun BodyAgeCard(snap: BodyAgeSnapshot?, chronoAge: Double, onClick: () -> Unit) {
+private fun BodyAgeCard(snap: BodyAgeSnapshot?, chronoAge: Double, failed: Boolean, onClick: () -> Unit) {
     val result = snap?.result
     val age = result?.bodyAge
     val delta = result?.deltaYears
     val line = when {
+        failed -> BodyAgeCopy.LOAD_ERROR + " \u00B7 " + BodyAgeCopy.RETRY
         snap == null -> BodyAgeCopy.LOADING
         age == null || delta == null -> BodyAgeCopy.CARD_EMPTY
         else -> BodyAgeCopy.cardDelta(delta, chronoAge) +
@@ -184,7 +223,10 @@ private fun DrinkChip(label: String, description: String, selected: Boolean, mod
 }
 
 @Composable
-private fun BodyAgeDialog(snap: BodyAgeSnapshot?, store: DrinksStore, onDrinks: () -> Unit, onClose: () -> Unit) {
+private fun BodyAgeDialog(
+    snap: BodyAgeSnapshot?, failed: Boolean, store: DrinksStore,
+    onRetry: () -> Unit, onDrinks: () -> Unit, onClose: () -> Unit,
+) {
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Box(modifier = Modifier.fillMaxSize().background(Palette.surfaceBase)) {
             ScreenScaffold(
@@ -192,7 +234,10 @@ private fun BodyAgeDialog(snap: BodyAgeSnapshot?, store: DrinksStore, onDrinks: 
                 subtitle = BodyAgeCopy.SCREEN_SUBTITLE,
                 trailing = { CloseChip(onClose) },
             ) {
-                if (snap == null) {
+                if (snap == null && failed) {
+                    Text(BodyAgeCopy.LOAD_ERROR, style = NoopType.subhead, color = Palette.statusWarning)
+                    ActionChip(BodyAgeCopy.RETRY, onRetry)
+                } else if (snap == null) {
                     Text(BodyAgeCopy.LOADING, style = NoopType.subhead, color = Palette.textTertiary)
                 } else {
                     BodyAgeContent(snap, store, onDrinks)
@@ -203,10 +248,13 @@ private fun BodyAgeDialog(snap: BodyAgeSnapshot?, store: DrinksStore, onDrinks: 
 }
 
 @Composable
-private fun CloseChip(onClose: () -> Unit) {
+private fun CloseChip(onClose: () -> Unit) = ActionChip(BodyAgeCopy.CLOSE, onClose)
+
+@Composable
+private fun ActionChip(label: String, onClick: () -> Unit) {
     val shape = RoundedCornerShape(Metrics.cornerPill)
     Text(
-        BodyAgeCopy.CLOSE,
+        label,
         style = NoopType.caption,
         color = Palette.textSecondary,
         modifier = Modifier
@@ -214,7 +262,7 @@ private fun CloseChip(onClose: () -> Unit) {
             .clip(shape)
             .background(Palette.surfaceInset)
             .border(Metrics.divider, Palette.hairline, shape)
-            .clickable(onClick = onClose)
+            .clickable(onClick = onClick)
             .padding(horizontal = Metrics.space12, vertical = Metrics.space6),
     )
 }
@@ -223,7 +271,7 @@ private fun CloseChip(onClose: () -> Unit) {
 private fun BodyAgeContent(snap: BodyAgeSnapshot, store: DrinksStore, onDrinks: () -> Unit) {
     val result = snap.result
     val scope = rememberCoroutineScope()
-    var picked by remember { mutableStateOf<Int?>(snap.drinksYesterday) }
+    var picked by remember(snap.drinksYesterday) { mutableStateOf<Int?>(snap.drinksYesterday) }
     var failed by remember { mutableStateOf(false) }
 
     Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
@@ -287,6 +335,9 @@ private fun BodyAgeContent(snap: BodyAgeSnapshot, store: DrinksStore, onDrinks: 
                     )
                     Text(BodyAgeCopy.chronoReference(result.chronoAge), style = NoopType.footnote, color = Palette.textTertiary)
                 }
+                if (snap.backfillingDays > 0) {
+                    Text(BodyAgeCopy.backfilling(snap.backfillingDays), style = NoopType.footnote, color = Palette.textTertiary)
+                }
             }
         }
 
@@ -296,7 +347,13 @@ private fun BodyAgeContent(snap: BodyAgeSnapshot, store: DrinksStore, onDrinks: 
                 picked = count
                 failed = false
                 scope.launch {
-                    val ok = runCatching { store.setDrinks(snap.yesterday.toString(), count) }.isSuccess
+                    val ok = try {
+                        store.setDrinks(DrinksStore.yesterdayKey(), count); true
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        false
+                    }
                     if (ok) onDrinks() else { picked = snap.drinksYesterday; failed = true }
                 }
             }
@@ -346,9 +403,8 @@ private fun Hero(snap: BodyAgeSnapshot) {
                     CountUpText(
                         value = age,
                         format = { it.roundToInt().toString() },
-                        style = NoopType.number(30f, weight = FontWeight.Bold)
-                            .copy(shadow = Shadow(color = Color.Black.copy(alpha = 0.5f), offset = Offset(0f, 1f), blurRadius = 6f)),
-                        color = Color.White,
+                        style = NoopType.number(30f, weight = FontWeight.Bold),
+                        color = Palette.textPrimary,
                         modifier = Modifier.clearAndSetSemantics {},
                     )
                 }

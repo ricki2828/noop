@@ -87,7 +87,12 @@ object BodyAgeCopy {
         "${label(key)} ${value(key, actual)}: −${oneDecimal(abs(years))} yrs"
 
     fun zoneSource(hrDays: Int, zoneDays: Int): String =
-        if (zoneDays == 0) "" else "Zone minutes: heart rate on $hrDays of 7 days, workouts on the rest"
+        if (zoneDays == 0) "" else "Zone minutes: heart rate on $hrDays of 7 days, workouts on the rest. Zone 2-3 counts bouts of 10 minutes or more."
+
+    fun backfilling(days: Int): String = "Trend still filling in: $days days of heart rate left to read"
+
+    const val LOAD_ERROR = "Couldn't read your data"
+    const val RETRY = "Retry"
 
     fun label(key: FactorKey): String = when (key) {
         FactorKey.SLEEP -> "Sleep"
@@ -96,7 +101,7 @@ object BodyAgeCopy {
         FactorKey.VO2MAX -> "Cardio fitness"
         FactorKey.HRV -> "HRV"
         FactorKey.STEPS -> "Steps"
-        FactorKey.ZONE_LOW -> "Easy and steady minutes"
+        FactorKey.ZONE_LOW -> "Zone 2-3 minutes"
         FactorKey.ZONE_HIGH -> "Hard minutes"
         FactorKey.STRENGTH -> "Strength"
         FactorKey.ALCOHOL -> "Alcohol"
@@ -110,7 +115,7 @@ object BodyAgeCopy {
         FactorKey.VO2MAX -> "One interval session a week: 4 x 4 minutes hard"
         FactorKey.HRV -> "No alcohol in the 3 hours before bed"
         FactorKey.STEPS -> "A 20-minute walk after lunch"
-        FactorKey.ZONE_LOW -> "Add 30 easy minutes on two days"
+        FactorKey.ZONE_LOW -> "Add two 30-minute zone 2 sessions"
         FactorKey.ZONE_HIGH -> "One session with 4 x 4 minutes hard"
         FactorKey.STRENGTH -> "Two 30-minute sessions a week"
         FactorKey.ALCOHOL -> "Keep it to one drinking day a week"
@@ -152,7 +157,7 @@ object BodyAgeCopy {
                 FactorKey.VO2MAX -> "no VO2 estimate yet"
                 FactorKey.STEPS -> "no step data"
                 FactorKey.ZONE_LOW, FactorKey.ZONE_HIGH -> "no heart rate or workout zones"
-                FactorKey.STRENGTH -> "no workouts recorded"
+                FactorKey.STRENGTH -> "no workouts recorded this week"
                 FactorKey.ALCOHOL -> "no drinks logged"
             }
         }
