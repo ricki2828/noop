@@ -138,7 +138,7 @@ fun BodyAgePlusToday(vm: AppViewModel) {
         }
     }
 
-    val retry = { loadFailed = false; lastRemaining = Int.MAX_VALUE; seq++ }
+    val retry: () -> Unit = { loadFailed = false; lastRemaining = Int.MAX_VALUE; seq++ }
     Column(verticalArrangement = Arrangement.spacedBy(Metrics.space8)) {
         BodyAgeCard(
             snap, profile.age.toDouble(), failed = loadFailed && snap == null,
