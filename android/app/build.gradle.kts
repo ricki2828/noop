@@ -23,10 +23,13 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.noop.whoop"
+        // Body Age+ fork: Play builds pass -PappId=xyz.taiaroa.bodyage and -PappVersionCode=<n>
+        // (bodyage-play.yml) so the fork is its own Play app signed with Ricki's upload key.
+        // Without the properties it stays the upstream id/versionCode.
+        applicationId = (project.findProperty("appId") as String?) ?: "com.noop.whoop"
         minSdk = 26
         targetSdk = 34
-        versionCode = 558
+        versionCode = (project.findProperty("appVersionCode") as String?)?.toInt() ?: 558
         versionName = "12.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

@@ -1,0 +1,181 @@
+name: bodyage-play
+# Body Age+ fork: signed release AAB + APK under the fork's own app id (xyz.taiaroa.bodyage),
+# signed with Ricki's upload key (secrets ANDROID_KEYSTORE_*), and optional Google Play upload.
+# versionCode = run_number + repo variable APP_VERSION_CODE_OFFSET (default 0). If this file is
+# renamed, run_number restarts: raise the offset first.
+on:
+  workflow_dispatch:
+    inputs:
+      play_upload:
+        description: 'Upload the release AAB to Google Play. Off: build only.'
+        type: boolean
+        default: false
+      play_track:
+        description: 'Play track (internal, alpha = closed testing, beta, production)'
+        type: choice
+        options: [internal, alpha, beta, production]
+        default: internal
+  push:
+    branches: [body-age-plus]
+    paths: ["android/**", "store/play/**", ".github/workflows/bodyage-play.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bodyage-play-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  APP_ID: xyz.taiaroa.bodyage
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version_code: ${{ steps.vc.outputs.code }}
+    defaults:
+      run:
+        working-directory: android
+    env:
+      ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/wrapper-validation@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+
+      - name: Version code
+        id: vc
+        env:
+          VC_OFFSET: ${{ vars.APP_VERSION_CODE_OFFSET || 0 }}
+        run: |
+          code=$(( ${{ github.run_number }} + VC_OFFSET ))
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Write keystore.properties
+        env:
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_B64" ]; then
+            echo "::error title=No upload key::ANDROID_KEYSTORE_B64 secret is not set."
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$ANDROID_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/upload.jks"
+          {
+            echo "storeFile=$RUNNER_TEMP/upload.jks"
+            echo "storePassword=$KS_PASS"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASS"
+          } > keystore.properties
+
+      - name: Signed release AAB + APK
+        run: ./gradlew bundleFullRelease assembleFullRelease -PappId="$APP_ID" -PappVersionCode=${{ steps.vc.outputs.code }} --no-daemon
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/upload.jks" keystore.properties
+
+      - name: Signing fingerprint + package check
+        env:
+          EXPECTED: ${{ vars.EXPECTED_UPLOAD_SHA256 }}
+        run: |
+          aab=$(ls app/build/outputs/bundle/fullRelease/*.aab | head -1)
+          apk=$(ls app/build/outputs/apk/full/release/*.apk | head -1)
+          got=$(keytool -printcert -jarfile "$aab" | awk '/SHA256:/{print $2; exit}')
+          echo "### AAB: $APP_ID versionCode ${{ steps.vc.outputs.code }}, signer SHA-256 $got" >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$EXPECTED" ] || [ "${got^^}" != "${EXPECTED^^}" ]; then
+            echo "::error title=Upload key mismatch::AAB is signed with $got, expected '$EXPECTED' (repo variable EXPECTED_UPLOAD_SHA256)."
+            exit 1
+          fi
+          mkdir -p ../dist
+          cp "$aab" "../dist/bodyage-${{ steps.vc.outputs.code }}.aab"
+          cp "$apk" "../dist/bodyage-${{ steps.vc.outputs.code }}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bodyage-release-aab
+          path: dist/*.aab
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bodyage-release-apk
+          path: dist/*.apk
+
+  play-upload:
+    # Runs on a manual dispatch from body-age-plus with play_upload ticked. Without
+    # PLAY_SERVICE_ACCOUNT_JSON in the `release` Environment it skips with a notice and stays green.
+    # The very first upload of a new app must be done by hand in Play Console.
+    name: Play upload
+    needs: [build]
+    if: ${{ needs.build.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.play_upload && github.ref == 'refs/heads/body-age-plus' }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - name: Check for the Play service account secret
+        id: gate
+        env:
+          PLAY_SA: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ -z "$PLAY_SA" ]; then
+            echo "::notice title=Play upload skipped::PLAY_SERVICE_ACCOUNT_JSON is not set in the release Environment. The signed AAB is in this run's bodyage-release-aab artifact."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        if: ${{ steps.gate.outputs.ready == 'true' }}
+        with:
+          persist-credentials: false
+          sparse-checkout: store/play/release-notes
+      - uses: actions/download-artifact@v4
+        if: ${{ steps.gate.outputs.ready == 'true' }}
+        with:
+          name: bodyage-release-aab
+          path: dist
+      - name: Verify the AAB signing key and resolve track and status
+        if: ${{ steps.gate.outputs.ready == 'true' }}
+        env:
+          EXPECTED: ${{ vars.EXPECTED_UPLOAD_SHA256 }}
+          INPUT_TRACK: ${{ inputs.play_track }}
+          VAR_STATUS: ${{ vars.PLAY_RELEASE_STATUS }}
+        run: |
+          aab=$(ls dist/*.aab | head -1)
+          got=$(keytool -printcert -jarfile "$aab" | awk '/SHA256:/{print $2; exit}')
+          if [ -z "$EXPECTED" ] || [ "${got^^}" != "${EXPECTED^^}" ]; then
+            echo "::error title=Upload key mismatch::AAB is signed with $got, expected '$EXPECTED'. Not uploading."
+            exit 1
+          fi
+          track="${INPUT_TRACK:-internal}"
+          status="${VAR_STATUS:-draft}"
+          case "$status" in completed|draft) ;; *) echo "::error::unsupported Play status '$status'"; exit 1 ;; esac
+          for f in store/play/release-notes/whatsnew-*; do
+            n=$(wc -m < "$f"); [ "$n" -le 500 ] || { echo "::error::$f is $n characters; Play allows 500"; exit 1; }
+          done
+          echo "AAB=$aab" >> "$GITHUB_ENV"
+          echo "TRACK=$track" >> "$GITHUB_ENV"
+          echo "STATUS=$status" >> "$GITHUB_ENV"
+          echo "### Play upload: track $track, status $status, versionCode ${{ needs.build.outputs.version_code }}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload to Google Play
+        if: ${{ steps.gate.outputs.ready == 'true' }}
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1.1.5
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: ${{ env.APP_ID }}
+          releaseFiles: ${{ env.AAB }}
+          track: ${{ env.TRACK }}
+          status: ${{ env.STATUS }}
+          whatsNewDirectory: store/play/release-notes
+      - name: Remove the service account key file
+        if: always()
+        run: rm -f serviceAccountJson.json
